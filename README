@@ -271,7 +271,7 @@ The flake provides a GHC 9.10 dev shell:
 
 ## Status
 
-Working tool, used by the author on Cheeblr (a real Haskell codebase of
+Working tool, tested on Cheeblr (a real Haskell codebase of
 ~9,000 lines). Format is a draft and will change. The annotation API has
 already grown once (the `consumes` field was added after the first round
 of real LLM smoke tests showed which kinds of cross-module reasoning the
