@@ -92,7 +92,7 @@ parseSourceFile path = do
 commonOperatorFixities :: [Fixity]
 commonOperatorFixities =
   -- lens / microlens
-  [ fixity (AssocLeft  ()) 1 "&"        -- Data.Function and lens both use 1
+  [ fixity (AssocLeft  ()) 1 "&"
   , fixity (AssocRight ()) 4 ".~"
   , fixity (AssocRight ()) 4 "?~"
   , fixity (AssocRight ()) 4 "%~"
