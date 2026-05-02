@@ -12,10 +12,10 @@ you left out. Both fail in different ways.
 `chase` is a third option. It reads your Haskell source files and emits a
 compressed representation that preserves the things an LLM cannot reconstruct
 from a type signature (architectural decisions, behavioral invariants, state
-machine topologies, magic constants) while dropping the things it can
-(function bodies, import name lists, boilerplate). The result is a single
-text file you paste into a fresh conversation that gives the model
-substantially more useful context per token than either source or
+machine topologies, magic constants, downstream dependents) while dropping
+the things it can (function bodies, import name lists, boilerplate). The
+result is a single text file you paste into a fresh conversation that gives
+the model substantially more useful context per token than either source or
 hand-written summaries.
 
 The name comes from "cut to the chase" — skip the preamble, get to what
@@ -34,20 +34,22 @@ extracts:
 Function bodies are dropped entirely. The module skeleton that remains is
 typically 3x to 10x smaller than the original source.
 
-For modules where you've supplied an annotation file, `chase` also attaches:
+For modules with annotations, `chase` also attaches:
 
 - `%const` declarations for hoisted magic constants with notes
-- `!` invariant lines after each function signature describing
-  behavior that the type does not capture
+- `!` invariant lines after each function signature describing behavior
+  that the type does not capture
+- `>` consumed-by lines pointing at downstream code that depends on the
+  function or its observable side effects
 - `%decision` blocks recording first-class architectural decisions
 - `%topology` blocks for state machines (intended for crem state machines
   but works for anything with a fixed transition graph)
 
-Annotations are written by hand in a separate Haskell module that depends on
-the `chase` library. They are not stored in source comments. This is
-deliberate: it keeps source clean, it keeps annotations versionable
-independently, and it lets the chase library validate annotation drift
-(invariants pointing at functions that no longer exist).
+Annotations live in a single JSON file alongside your `.cabal` file. They
+are not stored in source comments. This is deliberate: it keeps source
+clean, lets the chase library validate that invariants and decision
+`affects` lists reference real functions, and lets you version annotations
+independently of the code they describe.
 
 ## Output formats
 
@@ -63,80 +65,85 @@ Two modes:
 
 ## Usage
 
-The bare runner has no annotations and produces structure-only output:
+The bare runner produces structure-only output if no annotations are found:
 
     cabal run chase -- backend/src cheeblr.chase
     cabal run chase -- backend/src chase-output/
 
-For annotated output, write your own runner that imports `chase` as a
-library and supplies a `Map Text ModuleAnnotations`:
+If a file named `chase-annotations.json` exists in the current working
+directory, it is loaded automatically and merged into the output. To use a
+file at a different path, pass it as a third positional argument:
 
-```haskell
-module Main where
+    cabal run chase -- backend/src cheeblr.chase ./annotations/cheeblr.json
 
-import qualified Data.Map.Strict as Map
-import Chase
-import qualified Annotations.DB.Auth        as DBAuth
-import qualified Annotations.Server.Auth    as ServerAuth
-import qualified Annotations.App            as App
+The default-path being missing is silent (annotations are simply empty).
+An explicit path being missing is a hard error.
 
-main :: IO ()
-main = runChase defaultConfig
-  { cfgSourceRoots = ["backend/src"]
-  , cfgBundleFile  = Just "cheeblr.chase"
-  , cfgAnnotations = Map.unions
-      [ DBAuth.annotations
-      , ServerAuth.annotations
-      , App.annotations
-      ]
-  , cfgVerbose     = True
+## Annotation file format
+
+A JSON file keyed by module name:
+
+```json
+{
+  "version": 1,
+  "modules": {
+    "DB.Auth": {
+      "decisions": [
+        {
+          "name": "OpaqueRotatingSessionTokens",
+          "what": "PostgreSQL-backed opaque tokens with per-request rotation",
+          "why": [
+            "JWTs cannot be revoked without a denylist.",
+            "PostgreSQL is already in the stack, so no new infrastructure."
+          ],
+          "affects": ["createSession", "lookupSession", "rotateSessionToken"]
+        }
+      ],
+      "invariants": {
+        "hashPassword": [
+          "16-byte salt from getEntropy",
+          "returns PHC string with argonOpts baked in"
+        ],
+        "lookupSession": {
+          "intent": "Resolve a token to (Session, User) and bump last_seen_at",
+          "effects": ["DBPool", "IO"],
+          "notes": [
+            "SIDE EFFECT: updates last_seen_at on every successful lookup",
+            "called on every authenticated request"
+          ],
+          "spec": [
+            { "input": "lookupSession pool validToken",   "expected": "Just (sess, user)" },
+            { "input": "lookupSession pool revokedToken", "expected": "Nothing" }
+          ],
+          "consumes": [
+            "App.cookieAuthMiddleware (every authenticated request — hot path)",
+            "Server.Admin.buildSessionInfos via SessionInfo.siLastSeen",
+            "the last_seen_at write specifically: any worker reading idle sessions"
+          ]
+        }
+      }
+    }
   }
+}
 ```
 
-An annotation module looks like this:
+Invariants accept either a flat array of strings (each becomes a `!` line
+verbatim) or an object with structured fields:
 
-```haskell
-module Annotations.DB.Auth (annotations) where
+- `intent` renders as a leading `intent: ...` line
+- `effects` renders as one comma-joined `effects: A, B, C` line
+- `notes` are appended as plain `!` lines
+- `spec` entries each render as `spec: <input> => <expected>`
+- `consumes` entries render with the `>` sigil and a `consumed by:` prefix
+- `hint` becomes the optional escape-hatch line like `body: ~30 lines`
 
-import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
-import Data.Text (Text)
-import Chase
-
-annotations :: Map Text ModuleAnnotations
-annotations = Map.singleton "DB.Auth" auth
-
-auth :: ModuleAnnotations
-auth = (emptyAnnotations "DB.Auth")
-  { annInvariants =
-      [ inv "hashPassword"
-          [ "16-byte salt from getEntropy"
-          , "returns PHC string with argonOpts baked in"
-          ]
-      , invHinted "createSession"
-          [ "32-byte token, returned as URL-safe unpadded base64"
-          , "only SHA-256 of token stored in sessions.token_hash"
-          , "expires_at = now + 8h (hardcoded)"
-          ]
-          "body: ~25 lines, see source"
-      ]
-  , annDecisions =
-      [ decision "OpaqueRotatingSessionTokens"
-          "32 random bytes per session, only SHA-256 stored in DB"
-          "No JWT, no client-side state, revocation is immediate"
-          ["createSession", "lookupSession", "rotateSessionToken"]
-      ]
-  }
-```
-
-When the runner executes, it parses the source file, looks up the module
-name in the annotations map, and merges. The drift checker reports any
-annotated function name that doesn't exist among the file's signatures.
+Decision `why` accepts either a string or an array of strings; arrays are
+joined with spaces and rendered on a single line.
 
 ## What goes in a good annotation
 
-The bar to add a `!` line is "an LLM, looking only at the type signature,
-would get this wrong." Examples that meet the bar:
+The bar to add a `!` invariant line is "an LLM, looking only at the type
+signature, would get this wrong." Examples that meet the bar:
 
 - side effects not visible in the return type (DB writes, log emits, IORef
   mutations, time reads)
@@ -157,17 +164,39 @@ Examples that don't meet the bar:
 If you find yourself writing an invariant that explains the type, delete
 it. The LLM can read the type.
 
+The bar for a `>` consumed-by entry is different: "an LLM reasoning about
+a change to this function would benefit from knowing about this downstream
+dependency." Examples:
+
+- side effects read by code in another module (admin UI fields populated
+  by a write-on-read; the LLM cannot find this from callgraph because the
+  consumer reads a column, not a function)
+- late-binding consumers (subscribers to a broadcaster, SSE/WS handlers,
+  Katip scribes that fan out)
+- middleware-injected dependencies (auth headers consumed by every
+  authenticated Servant route)
+- the specific column or output a consumer reads, when the dependency is
+  finer-grained than the function itself
+
+`consumes` entries are free text and typically use module-qualified
+function names. Parenthetical context is encouraged when it sharpens the
+relationship: `"App.cookieAuthMiddleware (every authenticated request)"`
+is more useful than `"App.cookieAuthMiddleware"` alone.
+
 ## Recommended workflow
 
 1. Run the bare extractor first. Read the `.chase` output as if you'd never
    seen the codebase. Identify modules where the structural skeleton alone
    would not be enough to make a small correct change.
-2. Annotate one of those modules. Start with the smallest one with the most
-   behavioral subtlety.
+2. Annotate one of those modules. Start with the smallest one with the
+   most behavioral subtlety.
 3. Test in a fresh LLM conversation: paste only the annotated `.chase`
    bundle, ask for a small change, see what comes back. The mistakes the
    model makes tell you what's missing from your annotations.
-4. Iterate on annotations for that module until small changes succeed.
+4. Iterate. If the LLM's answer leans on speculation rather than retrieved
+   facts, that's a sign you need a sharper invariant or a `consumes`
+   pointer. If the LLM cites your invariants by name, the annotation is
+   doing its job.
 5. Repeat for the next priority module.
 
 Do not annotate everything before testing. The format and the kinds of
@@ -191,13 +220,25 @@ invariants worth recording will both shift after the first real test.
   parses. The cost is a much larger dependency and a different AST shape.
 
 The output is not source. You cannot regenerate the codebase from a
-`.chase` file. It is a description, not a definition. If anyone treats
-it as the source of truth, the project is in trouble.
+`.chase` file. It is a description, not a definition. If anyone treats it
+as the source of truth, the project is in trouble.
 
 Annotations are free-form text. They are not type-checked against
 behavior; they are checked only for the existence of the function names
 they reference. Wrong annotations produce wrong-but-confident LLM output.
 The drift checker is a sanity net, not a verifier.
+
+`consumes` is not drift-checked. Validating it would require gathering
+signatures from every parsed file before checking any single file's
+annotations; today the drift checker runs per-file. Cross-module
+consumer references rot silently.
+
+Module names are the annotation key. Two source files declaring
+`module Main where` (typical for cabal projects with multiple
+executables — e.g. an app entry point and a one-shot bootstrap) collide
+on the same key. The current workaround is to leave the secondary main
+unannotated. The fix is to key annotations by file path instead, which
+would be a backwards-compatible addition.
 
 ## Why this and not Haddock?
 
@@ -209,10 +250,11 @@ and source.
 
 `chase` is for an LLM helping you change your own private code. The
 audience already has the type signatures (those are emitted verbatim).
-What it doesn't have is the room to read paragraphs, the patience to chase
-examples, or the ability to fill in unwritten conventions. The `!`
-invariant format is optimized for that constraint: one line per fact,
-attached to the function it describes, sized for an LLM's working memory.
+What it doesn't have is the room to read paragraphs, the patience to
+chase examples, or the ability to fill in unwritten conventions. The `!`
+invariant format and the `>` consumed-by format are optimized for that
+constraint: one line per fact, attached to the function it describes,
+sized for an LLM's working memory.
 
 You can use both. They serve different readers.
 
@@ -221,7 +263,7 @@ You can use both. They serve different readers.
 Standard cabal:
 
     cabal build
-    cabal run chase -- <source-root> <output>
+    cabal run chase -- <source-root> <output> [<annotations.json>]
 
 The flake provides a GHC 9.10 dev shell:
 
@@ -230,17 +272,23 @@ The flake provides a GHC 9.10 dev shell:
 ## Status
 
 Working tool, used by the author on Cheeblr (a real Haskell codebase of
-~9,000 lines). Format is a draft and will change. The annotation API is
-particularly likely to grow as more failure modes turn up in real LLM
-conversations.
+~9,000 lines). Format is a draft and will change. The annotation API has
+already grown once (the `consumes` field was added after the first round
+of real LLM smoke tests showed which kinds of cross-module reasoning the
+`!`-only format wasn't pulling weight on) and is likely to grow again.
 
 Honest open questions:
 
 - Whether the `!` invariant format generalizes beyond the author's coding
   style and conventions.
 - Whether the manual annotation labor is sustainable on codebases larger
-  than a few thousand lines.
-- Whether the right next move is to extend annotations or to switch the
-  parser to `ghc-lib-parser` to enable a fuller AST-driven extraction.
+  than a few thousand lines, especially the `consumes` curation, which is
+  exactly the kind of cross-cutting metadata that rots fastest on a
+  moving codebase.
+- Whether the next move is to extend annotations further (cross-module
+  drift checking for `consumes`, file-path keying to handle `Main`
+  collisions, structured rejected-alternatives in decisions, decision
+  dates) or to switch the parser to `ghc-lib-parser` for a fuller
+  AST-driven extraction that could derive some of this automatically.
 
 Open to issues and PRs from anyone using this on their own code.
