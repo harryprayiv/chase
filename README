@@ -1,0 +1,246 @@
+# chase
+
+Structural compression of Haskell source for LLM context.
+
+## What problem this solves
+
+When you ask an LLM for help with a real codebase, you face a tradeoff: paste
+all the source and burn most of the context window before you've asked your
+question, or paste a curated subset and watch the LLM hallucinate the parts
+you left out. Both fail in different ways.
+
+`chase` is a third option. It reads your Haskell source files and emits a
+compressed representation that preserves the things an LLM cannot reconstruct
+from a type signature (architectural decisions, behavioral invariants, state
+machine topologies, magic constants) while dropping the things it can
+(function bodies, import name lists, boilerplate). The result is a single
+text file you paste into a fresh conversation that gives the model
+substantially more useful context per token than either source or
+hand-written summaries.
+
+The name comes from "cut to the chase" — skip the preamble, get to what
+actually matters.
+
+## What it does, mechanically
+
+For each Haskell source file, `chase` parses with `haskell-src-exts` and
+extracts:
+
+- module name and language pragmas
+- import declarations (collapsed to one line each, no name lists)
+- type signatures (verbatim from source span)
+- data, newtype, and type declarations (verbatim from source span)
+
+Function bodies are dropped entirely. The module skeleton that remains is
+typically 3x to 10x smaller than the original source.
+
+For modules where you've supplied an annotation file, `chase` also attaches:
+
+- `%const` declarations for hoisted magic constants with notes
+- `!` invariant lines after each function signature describing
+  behavior that the type does not capture
+- `%decision` blocks recording first-class architectural decisions
+- `%topology` blocks for state machines (intended for crem state machines
+  but works for anything with a fixed transition graph)
+
+Annotations are written by hand in a separate Haskell module that depends on
+the `chase` library. They are not stored in source comments. This is
+deliberate: it keeps source clean, it keeps annotations versionable
+independently, and it lets the chase library validate annotation drift
+(invariants pointing at functions that no longer exist).
+
+## Output formats
+
+Two modes:
+
+- **Bundle**: one concatenated `.chase` file with all module skeletons
+  separated by `=== BEGIN <path> ===` markers. This is the format you paste
+  into a conversation. Selected by giving an output path that ends in
+  `.chase`.
+- **Per-file**: a directory tree mirroring the source layout, one `.chase`
+  file per source file. Useful for diffing across runs or grepping for
+  specific symbols. Selected by giving any other output path.
+
+## Usage
+
+The bare runner has no annotations and produces structure-only output:
+
+    cabal run chase -- backend/src cheeblr.chase
+    cabal run chase -- backend/src chase-output/
+
+For annotated output, write your own runner that imports `chase` as a
+library and supplies a `Map Text ModuleAnnotations`:
+
+```haskell
+module Main where
+
+import qualified Data.Map.Strict as Map
+import Chase
+import qualified Annotations.DB.Auth        as DBAuth
+import qualified Annotations.Server.Auth    as ServerAuth
+import qualified Annotations.App            as App
+
+main :: IO ()
+main = runChase defaultConfig
+  { cfgSourceRoots = ["backend/src"]
+  , cfgBundleFile  = Just "cheeblr.chase"
+  , cfgAnnotations = Map.unions
+      [ DBAuth.annotations
+      , ServerAuth.annotations
+      , App.annotations
+      ]
+  , cfgVerbose     = True
+  }
+```
+
+An annotation module looks like this:
+
+```haskell
+module Annotations.DB.Auth (annotations) where
+
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import Data.Text (Text)
+import Chase
+
+annotations :: Map Text ModuleAnnotations
+annotations = Map.singleton "DB.Auth" auth
+
+auth :: ModuleAnnotations
+auth = (emptyAnnotations "DB.Auth")
+  { annInvariants =
+      [ inv "hashPassword"
+          [ "16-byte salt from getEntropy"
+          , "returns PHC string with argonOpts baked in"
+          ]
+      , invHinted "createSession"
+          [ "32-byte token, returned as URL-safe unpadded base64"
+          , "only SHA-256 of token stored in sessions.token_hash"
+          , "expires_at = now + 8h (hardcoded)"
+          ]
+          "body: ~25 lines, see source"
+      ]
+  , annDecisions =
+      [ decision "OpaqueRotatingSessionTokens"
+          "32 random bytes per session, only SHA-256 stored in DB"
+          "No JWT, no client-side state, revocation is immediate"
+          ["createSession", "lookupSession", "rotateSessionToken"]
+      ]
+  }
+```
+
+When the runner executes, it parses the source file, looks up the module
+name in the annotations map, and merges. The drift checker reports any
+annotated function name that doesn't exist among the file's signatures.
+
+## What goes in a good annotation
+
+The bar to add a `!` line is "an LLM, looking only at the type signature,
+would get this wrong." Examples that meet the bar:
+
+- side effects not visible in the return type (DB writes, log emits, IORef
+  mutations, time reads)
+- specific encoding choices (URL-safe base64, hex, big-endian)
+- hardcoded values that look configurable (timeouts, retry counts, list
+  lengths)
+- ordering constraints (X must be called before Y)
+- silent failure modes (returns Nothing on validation error vs. throws)
+- consequences of the implementation that affect callers (one extra DB
+  round-trip, allocates a new connection, holds a lock)
+
+Examples that don't meet the bar:
+
+- restating what the type already says
+- documenting parameters by name when names are already in the signature
+- general-purpose explanations of what a function does
+
+If you find yourself writing an invariant that explains the type, delete
+it. The LLM can read the type.
+
+## Recommended workflow
+
+1. Run the bare extractor first. Read the `.chase` output as if you'd never
+   seen the codebase. Identify modules where the structural skeleton alone
+   would not be enough to make a small correct change.
+2. Annotate one of those modules. Start with the smallest one with the most
+   behavioral subtlety.
+3. Test in a fresh LLM conversation: paste only the annotated `.chase`
+   bundle, ask for a small change, see what comes back. The mistakes the
+   model makes tell you what's missing from your annotations.
+4. Iterate on annotations for that module until small changes succeed.
+5. Repeat for the next priority module.
+
+Do not annotate everything before testing. The format and the kinds of
+invariants worth recording will both shift after the first real test.
+
+## Limitations to know about
+
+`haskell-src-exts` is the parser. It is not GHC. Specifically:
+
+- It does not understand all modern GHC extensions. `OverloadedRecordDot`,
+  recent kind-signature syntax, and a handful of others can cause parse
+  failures. Files that fail to parse are reported and skipped; the bundle
+  still generates from the rest.
+- It needs operator fixities to disambiguate infix chains. The
+  `commonOperatorFixities` list in `Chase.Parse` covers `lens`, `aeson`,
+  and `servant` operators. If you hit "ambiguous infix expression" on a
+  file, the operator in question needs to be added to that list.
+- When the parse failure rate becomes painful (more than ~10% of your
+  files), the move is to switch the parser to `ghc-lib-parser`. That's
+  the actual GHC frontend exposed as a library and parses anything GHC
+  parses. The cost is a much larger dependency and a different AST shape.
+
+The output is not source. You cannot regenerate the codebase from a
+`.chase` file. It is a description, not a definition. If anyone treats
+it as the source of truth, the project is in trouble.
+
+Annotations are free-form text. They are not type-checked against
+behavior; they are checked only for the existence of the function names
+they reference. Wrong annotations produce wrong-but-confident LLM output.
+The drift checker is a sanity net, not a verifier.
+
+## Why this and not Haddock?
+
+Haddock documents APIs for human readers of a public interface. Its
+audience is a developer who has already decided to use your library and
+wants to know what each function takes and returns. It assumes the reader
+will fill in behavioral context from documentation paragraphs, examples,
+and source.
+
+`chase` is for an LLM helping you change your own private code. The
+audience already has the type signatures (those are emitted verbatim).
+What it doesn't have is the room to read paragraphs, the patience to chase
+examples, or the ability to fill in unwritten conventions. The `!`
+invariant format is optimized for that constraint: one line per fact,
+attached to the function it describes, sized for an LLM's working memory.
+
+You can use both. They serve different readers.
+
+## Build
+
+Standard cabal:
+
+    cabal build
+    cabal run chase -- <source-root> <output>
+
+The flake provides a GHC 9.10 dev shell:
+
+    nix develop
+
+## Status
+
+Working tool, used by the author on Cheeblr (a real Haskell codebase of
+~9,000 lines). Format is a draft and will change. The annotation API is
+particularly likely to grow as more failure modes turn up in real LLM
+conversations.
+
+Honest open questions:
+
+- Whether the `!` invariant format generalizes beyond the author's coding
+  style and conventions.
+- Whether the manual annotation labor is sustainable on codebases larger
+  than a few thousand lines.
+- Whether the right next move is to extend annotations or to switch the
+  parser to `ghc-lib-parser` to enable a fuller AST-driven extraction.
+
+Open to issues and PRs from anyone using this on their own code.

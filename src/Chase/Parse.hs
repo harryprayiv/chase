@@ -26,6 +26,10 @@ import Language.Haskell.Exts
   , prettyPrint
   , KnownExtension (..)
   , Extension (..)
+  , Fixity (..)
+  , Assoc (..)
+  , QName (..)
+  , baseFixities
   )
 
 import Chase.Types
@@ -49,6 +53,7 @@ parseSourceFile path = do
                glasgowExts
             <> map EnableExtension knownExtras
             <> map UnknownExtension unknownExtras
+        , fixities = Just (baseFixities <> commonOperatorFixities)
         }
   result <- parseFileWithMode mode path
   case result of
@@ -71,15 +76,52 @@ parseSourceFile path = do
 
     -- Extensions newer than this haskell-src-exts release knows about.
     -- Stored as UnknownExtension strings; the parser will accept the
-    -- pragma but may not implement the syntax. Files using these
-    -- features may still fail to parse and will be reported as
-    -- ParseFailures by the pipeline.
+    -- pragma but may not implement the syntax.
     unknownExtras =
       [ "NumericUnderscores"
       , "ApplicativeDo"
       , "AllowAmbiguousTypes"
       , "StandaloneKindSignatures"
       ]
+
+-- | Fixities for operators from libraries we commonly encounter but
+-- whose imports haskell-src-exts does not chase. Without these, code
+-- like @x & a .~ b & c ?~ d@ produces "ambiguous infix expression".
+-- Add new entries here when a parse failure traces back to an unknown
+-- operator's precedence.
+commonOperatorFixities :: [Fixity]
+commonOperatorFixities =
+  -- lens / microlens
+  [ fixity (AssocLeft  ()) 1 "&"        -- Data.Function and lens both use 1
+  , fixity (AssocRight ()) 4 ".~"
+  , fixity (AssocRight ()) 4 "?~"
+  , fixity (AssocRight ()) 4 "%~"
+  , fixity (AssocRight ()) 4 "+~"
+  , fixity (AssocRight ()) 4 "-~"
+  , fixity (AssocRight ()) 4 "<>~"
+  , fixity (AssocLeft  ()) 8 "^."
+  , fixity (AssocLeft  ()) 8 "^.."
+  , fixity (AssocLeft  ()) 8 "^?"
+  , fixity (AssocLeft  ()) 8 "^?!"
+  , fixity (AssocLeft  ()) 1 "&~"
+  , fixity (AssocRight ()) 9 "#."
+  , fixity (AssocLeft  ()) 9 ".#"
+  -- profunctors / arrows used in lens combinator chains
+  , fixity (AssocRight ()) 1 ":~>"
+  , fixity (AssocRight ()) 1 ":~"
+  -- aeson
+  , fixity (AssocRight ()) 8 ".:"
+  , fixity (AssocRight ()) 8 ".:?"
+  , fixity (AssocRight ()) 8 ".:!"
+  , fixity (AssocRight ()) 8 ".!="
+  , fixity (AssocRight ()) 8 ".="
+  -- servant
+  , fixity (AssocRight ()) 4 ":>"
+  , fixity (AssocRight ()) 3 ":<|>"
+  ]
+  where
+    fixity assoc prec sym =
+      Fixity assoc prec (UnQual () (Symbol () sym))
 
 extractStructure :: FilePath -> [Text] -> Module SrcSpanInfo -> ChaseFile
 extractStructure path sourceLines = \case
