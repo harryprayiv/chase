@@ -20,6 +20,7 @@
 -- >           "effects": ["DBPool", "IO"],
 -- >           "notes":  ["..."],
 -- >           "spec":   [{"input": "...", "expected": "..."}],
+-- >           "consumes": ["Server.Auth.loginHandler", "..."],
 -- >           "hint":   "body: ~30 lines, see source"
 -- >         }
 -- >       },
@@ -128,7 +129,6 @@ parseConstant = A.withObject "constant" $ \o -> do
     , constNotes    = map noteFromText notes
     }
 
--- | Plain string is a Note. String prefixed "BUG: " is a BugNote.
 noteFromText :: Text -> Note
 noteFromText t = case T.stripPrefix "BUG: " t of
   Just rest -> BugNote rest
@@ -136,18 +136,11 @@ noteFromText t = case T.stripPrefix "BUG: " t of
 
 -- invariants -----------------------------------------------------------
 
--- | Invariants are encoded as an object keyed by function name.
--- Each value is either:
+-- | Each invariant value is either:
 --
---   * an array of strings (the @!@ lines verbatim), or
+--   * an array of strings (the @!@ lines verbatim, no consumes), or
 --   * an object with optional fields @intent@, @effects@, @notes@,
---     @spec@, @hint@.
---
--- Object form composes into a single Invariant: @intent@ becomes a
--- leading "intent: ..." line, @effects@ becomes one comma-joined
--- "effects: ..." line, @notes@ are appended verbatim, each @spec@
--- entry becomes one "spec: input => expected" line, @hint@ maps to
--- 'invBodyHint'.
+--     @spec@, @consumes@, @hint@.
 parseInvariantsMap :: A.Object -> AT.Parser [Invariant]
 parseInvariantsMap obj = mapM parseOne (KM.toList obj)
   where
@@ -155,25 +148,26 @@ parseInvariantsMap obj = mapM parseOne (KM.toList obj)
 
 parseInvariantValue :: Text -> A.Value -> AT.Parser Invariant
 parseInvariantValue fnName = \case
-  v@(A.Array _)  -> inv fnName <$> AT.parseJSON v
-  A.Object o     -> parseObjectInvariant fnName o
-  _              -> fail $ "invariants." <> T.unpack fnName
-                    <> " must be an array of strings or an object"
+  v@(A.Array _) -> inv fnName <$> AT.parseJSON v
+  A.Object o    -> parseObjectInvariant fnName o
+  _             -> fail $ "invariants." <> T.unpack fnName
+                   <> " must be an array of strings or an object"
 
 parseObjectInvariant :: Text -> A.Object -> AT.Parser Invariant
 parseObjectInvariant fnName o = do
-  mIntent <- o A..:? "intent"
-  effects <- o A..:? "effects" A..!= ([] :: [Text])
-  notes   <- o A..:? "notes"   A..!= ([] :: [Text])
-  specs   <- o A..:? "spec"    A..!= ([] :: [SpecEntry])
-  hint    <- o A..:? "hint"
+  mIntent  <- o A..:? "intent"
+  effects  <- o A..:? "effects"  A..!= ([] :: [Text])
+  notes    <- o A..:? "notes"    A..!= ([] :: [Text])
+  specs    <- o A..:? "spec"     A..!= ([] :: [SpecEntry])
+  consumes <- o A..:? "consumes" A..!= ([] :: [Text])
+  hint     <- o A..:? "hint"
   let intentLine = maybe [] (\t -> ["intent: " <> t]) mIntent
       effectLine =
         if null effects
           then []
           else ["effects: " <> T.intercalate ", " effects]
       lns = intentLine <> effectLine <> notes <> map renderSpec specs
-  pure $ Invariant fnName lns hint
+  pure $ Invariant fnName lns consumes hint
 
 data SpecEntry = SpecEntry
   { seInput    :: Text
@@ -197,7 +191,7 @@ parseDecision = A.withObject "decision" $ \o -> do
   whyVal  <- o A..:? "why" A..!= A.String ""
   affects <- o A..:? "affects" A..!= []
   why <- case whyVal of
-    A.String s   -> pure s
+    A.String s    -> pure s
     a@(A.Array _) -> T.intercalate " " <$> AT.parseJSON a
     _ -> fail "decision.why must be a string or array of strings"
   pure $ Decision name what why affects

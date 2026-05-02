@@ -35,9 +35,6 @@ renderImports imps =
   let collapsed = filter (not . T.null) (map collapseImport imps)
   in [ "%uses " <> i | i <- collapsed ] <> [""]
 
--- | Collapse a possibly multi-line import to one line, drop the explicit
--- name list, drop the leading "import " keyword. The LLM does not need
--- to know that you imported (sort, nub) specifically.
 collapseImport :: Text -> Text
 collapseImport raw =
   let oneLine  = T.unwords (T.words raw)
@@ -77,6 +74,8 @@ renderDataDecls ds = concatMap one ds <> [""]
   where
     one ChaseDataDecl{..} = [cddVerbatim, ""]
 
+-- | "!" lines are invariants. ">" lines are downstream consumers (docs
+-- pointers, free-text). Both are indented two spaces under the type sig.
 renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
 renderSignaturesWithInvariants sigs invs =
   concatMap (renderSig invMap) sigs
@@ -88,7 +87,8 @@ renderSignaturesWithInvariants sigs invs =
           extra = case attached of
             Nothing -> []
             Just Invariant{..} ->
-              [ "  ! " <> l | l <- invLines ]
+                 [ "  ! " <> l                 | l <- invLines    ]
+              <> [ "  > consumed by: " <> c    | c <- invConsumes ]
               <> case invBodyHint of
                    Nothing -> []
                    Just h  -> ["  " <> h]

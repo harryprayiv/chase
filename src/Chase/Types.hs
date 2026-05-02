@@ -71,8 +71,7 @@ data ChaseDataDecl = ChaseDataDecl
   }
   deriving stock (Show, Generic)
 
--- | All hand-curated annotations for a single module. Keyed by module
--- name in the pipeline\'s top-level Map.
+-- | All hand-curated annotations for a single module.
 data ModuleAnnotations = ModuleAnnotations
   { annModName    :: Text
   , annConstants  :: [Constant]
@@ -104,11 +103,19 @@ data Note = Note Text | BugNote Text
   deriving stock (Show, Generic)
 
 -- | One or more invariant lines attached to a function by name.
--- The 'invBodyHint' is the optional escape-hatch line like
+--
+-- 'invConsumes' lists downstream code that depends on the function or
+-- its observable side effects. Renders as "  > consumed by: ..." lines
+-- after the "!" invariant lines. These are documentation pointers, not
+-- callgraph references — entries are free text and may include module
+-- qualification, descriptive parentheticals, etc.
+--
+-- 'invBodyHint' is the optional escape-hatch line like
 -- @"body: ~30 lines, see source"@.
 data Invariant = Invariant
   { invFunction :: Text
   , invLines    :: [Text]
+  , invConsumes :: [Text]
   , invBodyHint :: Maybe Text
   }
   deriving stock (Show, Generic)
@@ -123,8 +130,6 @@ data Decision = Decision
   deriving stock (Show, Generic)
 
 -- | A state machine topology. Renders as %topology lines in the output.
--- Use this for crem state machines or anything else with a fixed
--- transition graph.
 data Topology = Topology
   { topName        :: Text
   , topVertices    :: [Text]
@@ -135,10 +140,10 @@ data Topology = Topology
 -- helpers -----------------------------------------------------------
 
 inv :: Text -> [Text] -> Invariant
-inv n ls = Invariant n ls Nothing
+inv n ls = Invariant n ls [] Nothing
 
 invHinted :: Text -> [Text] -> Text -> Invariant
-invHinted n ls h = Invariant n ls (Just h)
+invHinted n ls h = Invariant n ls [] (Just h)
 
 constNote :: Text -> Note
 constNote = Note
