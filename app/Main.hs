@@ -12,7 +12,6 @@ import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 import Chase
-import Chase.Annotations.Json (loadAnnotations)
 
 defaultAnnotationsPath :: FilePath
 defaultAnnotationsPath = "chase-annotations.json"
