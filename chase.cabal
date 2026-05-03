@@ -46,6 +46,7 @@ library
                     , aeson         >= 2.0      
                     , bytestring
                     , directory 
+                    , ghc-lib-parser
 executable chase
   import:             warnings
   main-is:            Main.hs
@@ -59,3 +60,4 @@ executable chase
                     , chase
                     , text
                     , containers
+                    , ghc-lib-parser
