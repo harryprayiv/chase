@@ -1,36 +1,43 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+
 module Chase.Types
-  ( -- * Module-level chase record
-    ChaseFile (..)
+  ( ChaseFile (..)
   , emptyChaseFile
-    -- * Structural pieces extracted from source
   , Signature (..)
+  , Pattern (..)
+  , Fixity (..)
   , ChaseDataDecl (..)
-    -- * Hand-curated annotations
   , ModuleAnnotations (..)
   , emptyAnnotations
   , Constant (..)
   , Note (..)
   , Invariant (..)
-  , Decision (..)
-  , Topology (..)
-    -- * Annotation helpers
   , inv
   , invHinted
   , constNote
   , constBug
+  , Decision (..)
   , decision
+  , Topology (..)
   ) where
 
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
--- | The full extracted plus annotated representation of one source file.
+-- | The canonical structural description of one Haskell source file as
+-- chase sees it. Structural fields are populated by Chase.Parse;
+-- annotation fields (constants, invariants, decisions, topologies) are
+-- merged in later by Chase.Pipeline.attachAnnotations.
 data ChaseFile = ChaseFile
   { chaseSourcePath  :: FilePath
   , chaseModuleName  :: Text
   , chaseExtensions  :: [Text]
+  , chaseFixities    :: [Fixity]
   , chaseImports     :: [Text]
   , chaseSignatures  :: [Signature]
+  , chasePatterns    :: [Pattern]
   , chaseDataDecls   :: [ChaseDataDecl]
   , chaseConstants   :: [Constant]
   , chaseInvariants  :: [Invariant]
@@ -41,12 +48,14 @@ data ChaseFile = ChaseFile
   deriving stock (Show, Generic)
 
 emptyChaseFile :: FilePath -> ChaseFile
-emptyChaseFile p = ChaseFile
-  { chaseSourcePath  = p
+emptyChaseFile path = ChaseFile
+  { chaseSourcePath  = path
   , chaseModuleName  = ""
   , chaseExtensions  = []
+  , chaseFixities    = []
   , chaseImports     = []
   , chaseSignatures  = []
+  , chasePatterns    = []
   , chaseDataDecls   = []
   , chaseConstants   = []
   , chaseInvariants  = []
@@ -55,7 +64,6 @@ emptyChaseFile p = ChaseFile
   , chaseParseErrors = []
   }
 
--- | A type signature, captured verbatim from source by source span slice.
 data Signature = Signature
   { sigName     :: Text
   , sigVerbatim :: Text
@@ -63,7 +71,26 @@ data Signature = Signature
   }
   deriving stock (Show, Generic)
 
--- | A data, newtype, or type alias declaration, captured verbatim.
+-- | A pattern synonym, possibly with a separately-declared type
+-- signature. patVerbatim is the rendered combined view: type sig (if
+-- present) followed by definition.
+data Pattern = Pattern
+  { patName     :: Text
+  , patVerbatim :: Text
+  , patSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
+-- | A top-level fixity declaration, e.g. 'infixr 5 :<>'. fixVerbatim
+-- preserves the source as written. fixOps are the operator names this
+-- declaration applies to (one fixity decl can name multiple ops).
+data Fixity = Fixity
+  { fixVerbatim :: Text
+  , fixOps      :: [Text]
+  , fixSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
 data ChaseDataDecl = ChaseDataDecl
   { cddName     :: Text
   , cddVerbatim :: Text
@@ -71,7 +98,6 @@ data ChaseDataDecl = ChaseDataDecl
   }
   deriving stock (Show, Generic)
 
--- | All hand-curated annotations for a single module.
 data ModuleAnnotations = ModuleAnnotations
   { annModName    :: Text
   , annConstants  :: [Constant]
@@ -82,15 +108,8 @@ data ModuleAnnotations = ModuleAnnotations
   deriving stock (Show, Generic)
 
 emptyAnnotations :: Text -> ModuleAnnotations
-emptyAnnotations name = ModuleAnnotations
-  { annModName    = name
-  , annConstants  = []
-  , annInvariants = []
-  , annDecisions  = []
-  , annTopologies = []
-  }
+emptyAnnotations m = ModuleAnnotations m [] [] [] []
 
--- | A named constant with optional notes. Useful for hoisting magic numbers.
 data Constant = Constant
   { constName     :: Text
   , constValueDoc :: Text
@@ -98,20 +117,15 @@ data Constant = Constant
   }
   deriving stock (Show, Generic)
 
--- | A note attached to a constant. 'BugNote' renders with a BUG: prefix.
 data Note = Note Text | BugNote Text
   deriving stock (Show, Generic)
 
--- | One or more invariant lines attached to a function by name.
---
--- 'invConsumes' lists downstream code that depends on the function or
--- its observable side effects. Renders as "  > consumed by: ..." lines
--- after the "!" invariant lines. These are documentation pointers, not
--- callgraph references — entries are free text and may include module
--- qualification, descriptive parentheticals, etc.
---
--- 'invBodyHint' is the optional escape-hatch line like
--- @"body: ~30 lines, see source"@.
+constNote :: Text -> Note
+constNote = Note
+
+constBug :: Text -> Note
+constBug = BugNote
+
 data Invariant = Invariant
   { invFunction :: Text
   , invLines    :: [Text]
@@ -120,7 +134,12 @@ data Invariant = Invariant
   }
   deriving stock (Show, Generic)
 
--- | A first-class architectural decision, attached to one or more functions.
+inv :: Text -> [Text] -> Invariant
+inv fn ls = Invariant fn ls [] Nothing
+
+invHinted :: Text -> [Text] -> Text -> Invariant
+invHinted fn ls hint = Invariant fn ls [] (Just hint)
+
 data Decision = Decision
   { decName    :: Text
   , decWhat    :: Text
@@ -129,27 +148,12 @@ data Decision = Decision
   }
   deriving stock (Show, Generic)
 
--- | A state machine topology. Renders as %topology lines in the output.
+decision :: Text -> Text -> Text -> [Text] -> Decision
+decision = Decision
+
 data Topology = Topology
   { topName        :: Text
   , topVertices    :: [Text]
   , topTransitions :: [(Text, [Text])]
   }
   deriving stock (Show, Generic)
-
--- helpers -----------------------------------------------------------
-
-inv :: Text -> [Text] -> Invariant
-inv n ls = Invariant n ls [] Nothing
-
-invHinted :: Text -> [Text] -> Text -> Invariant
-invHinted n ls h = Invariant n ls [] (Just h)
-
-constNote :: Text -> Note
-constNote = Note
-
-constBug :: Text -> Note
-constBug = BugNote
-
-decision :: Text -> Text -> Text -> [Text] -> Decision
-decision = Decision

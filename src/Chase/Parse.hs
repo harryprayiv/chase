@@ -10,6 +10,8 @@ import qualified Data.Text          as T
 import           Data.Text          (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString    as BS
+import           Data.List          (sortOn)
+import qualified Data.Map.Strict    as Map
 
 -- ghc-lib-parser
 import GHC.Data.FastString       (mkFastString)
@@ -30,7 +32,7 @@ import GHC.Types.SrcLoc          (mkRealSrcLoc, unLoc, getLoc, SrcSpan (..),
 import GHC.Hs                    (HsModule (..), GhcPs)
 import GHC.Hs.Decls              (HsDecl (..), TyClDecl (..), InstDecl (..),
                                   ClsInstDecl (..), FamilyDecl (..), LHsDecl)
-import GHC.Hs.Binds              (Sig (..), LSig)
+import GHC.Hs.Binds              (Sig (..), LSig, HsBindLR (..))
 import GHC.Parser.Annotation     (locA)
 import GHC.Types.Name.Reader     (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -48,11 +50,6 @@ data ParseFailure = ParseFailure
   , pfMsg  :: Text
   }
 
--- | Parse a Haskell source file using GHC's own parser via
--- ghc-lib-parser. Source-level LANGUAGE pragmas are read by GHC's
--- own pragma extractor and applied to DynFlags before parsing, so
--- syntactic extensions like TemplateHaskell, QuasiQuotes, and
--- TypeApplications work exactly as GHC handles them.
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
 parseSourceFile path = do
   bytes <- BS.readFile path
@@ -73,12 +70,6 @@ parseSourceFile path = do
 -- LANGUAGE pragma application
 ------------------------------------------------------------------
 
--- | Read LANGUAGE pragmas from the source buffer and turn each one
--- into a DynFlags update. This is what GHC's own driver does before
--- handing a file to the parser; we replicate it for the parser-only
--- call path. Without this, files using TemplateHaskell, QuasiQuotes,
--- TypeApplications, etc. fail to parse because their syntactic
--- productions are gated behind the corresponding extension flag.
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
 applySourcePragmas path buf df0 =
   let initialOpts       = initParserOpts df0
@@ -97,11 +88,6 @@ applySourcePragmas path buf df0 =
         Just ext -> xopt_set df ext
         Nothing  -> df
 
--- | Parse a "-XFoo" or "-XNoFoo" string into an Extension. We do
--- not handle "No*" prefixes because chase only adds extensions; if
--- a file disables a default-on extension that disabling will be
--- silently ignored, which is fine for parsing purposes (disabling
--- an extension never enables new syntax that would otherwise fail).
 parseExtensionFlag :: String -> Maybe LangExt.Extension
 parseExtensionFlag s = case s of
   '-':'X':rest -> readExtension rest
@@ -123,22 +109,24 @@ extractStructure path sourceText sourceLines hsmod =
   (emptyChaseFile path)
     { chaseModuleName = moduleNameOf hsmod
     , chaseExtensions = pragmasFromSource sourceText
+    , chaseFixities   = concatMap (extractFixity sourceLines) (hsmodDecls hsmod)
     , chaseImports    = importsOf hsmod
     , chaseSignatures = concatMap (extractSignatures sourceLines) (hsmodDecls hsmod)
+    , chasePatterns   = mergePatterns
+                          (concatMap (extractPatternSig  sourceLines) (hsmodDecls hsmod))
+                          (concatMap (extractPatternBind sourceLines) (hsmodDecls hsmod))
     , chaseDataDecls  = concatMap (extractDataDecl  sourceLines) (hsmodDecls hsmod)
     }
+
+renderParseError :: PState -> Text
+renderParseError pst =
+  let msgs = getPsErrorMessages pst
+  in T.pack (showSDocUnsafe (ppr msgs))
 
 moduleNameOf :: HsModule GhcPs -> Text
 moduleNameOf m = case hsmodName m of
   Just lmn -> T.pack (moduleNameString (unLoc lmn))
   Nothing  -> ""
-
--- | Pretty-print parse errors from a failed PState. Uses GHC's
--- own ppr instance so the format matches what ghc itself prints.
-renderParseError :: PState -> Text
-renderParseError pst =
-  let msgs = getPsErrorMessages pst
-  in T.pack (showSDocUnsafe (ppr msgs))
 
 importsOf :: HsModule GhcPs -> [Text]
 importsOf m = map renderImport (hsmodImports m)
@@ -176,6 +164,151 @@ sigToSignatures sourceLines sp = \case
                 (startLine sp)
     | n <- names ]
   _ -> []
+
+------------------------------------------------------------------
+-- Pattern synonyms (definitions and signatures, merged by name)
+------------------------------------------------------------------
+
+-- | Extract pattern synonym TYPE SIGNATURES (PatSynSig). These can
+-- appear separately from the pattern definition, e.g.:
+--
+--     pattern Foo :: Int -> Maybe Int
+--     pattern Foo n = Just n
+--
+-- This function picks up only the signature line; extractPatternBind
+-- picks up the definition; mergePatterns combines them.
+extractPatternSig :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
+extractPatternSig sourceLines ldecl =
+  let sp = locA (getLoc ldecl)
+  in case unLoc ldecl of
+       SigD _ (PatSynSig _ names _) ->
+         [ ( rdrNameToText (unLoc n)
+           , startLine sp
+           , sliceSourceSpan sourceLines sp
+           )
+         | n <- names ]
+       _ -> []
+
+-- | Extract pattern synonym DEFINITIONS (PatSynBind inside a ValD).
+-- We render the whole binding via the AST's pp instance and pull the
+-- pattern name out of the rendered text. This dodges version-specific
+-- field-name access on PatSynBind, which is a moving target.
+extractPatternBind :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
+extractPatternBind sourceLines ldecl =
+  let sp = locA (getLoc ldecl)
+  in case unLoc ldecl of
+       ValD _ bind -> case bind of
+         PatSynBind _ _ ->
+           let rendered = sliceSourceSpan sourceLines sp
+               nm       = patternNameFromSource rendered
+           in case nm of
+                Just n  -> [(n, startLine sp, rendered)]
+                Nothing -> []
+         _ -> []
+       _ -> []
+
+-- | Pull the pattern name out of a rendered pattern synonym binding.
+-- Handles three source shapes:
+--   pattern Foo ...          -- alphabetic, prefix
+--   pattern (:<<) ...        -- operator, parenthesized (always for sigs)
+--   pattern x :<< xs = ...   -- operator, infix definition form
+-- Returns the bare operator name without parentheses so the merge in
+-- mergePatterns matches signatures to definitions.
+patternNameFromSource :: Text -> Maybe Text
+patternNameFromSource src =
+  let trimmed = T.dropWhile isHSpace src
+  in case T.stripPrefix "pattern" trimmed of
+       Nothing -> Nothing
+       Just rest ->
+         let body = T.dropWhile isHSpace rest
+         in case T.uncons body of
+              -- Parenthesized operator: pattern (:<<) ...
+              Just ('(', afterOpen) ->
+                let opName = T.takeWhile (/= ')') afterOpen
+                in if T.null opName then Nothing else Just (T.strip opName)
+              -- Otherwise: alphabetic prefix OR infix-form definition
+              _ ->
+                let firstTok = T.takeWhile (\c -> not (isHSpace c)
+                                                 && c /= '\n'
+                                                 && c /= ',') body
+                    rest'    = T.dropWhile isHSpace
+                                 (T.dropWhile (\c -> not (isHSpace c)) body)
+                    nextTok  = T.takeWhile (\c -> not (isHSpace c)
+                                                 && c /= '\n') rest'
+                in if isOperatorish nextTok && not (T.null nextTok)
+                     -- pattern x :<< xs ... — middle token is the op
+                     then Just nextTok
+                     else if T.null firstTok
+                       then Nothing
+                       else Just firstTok
+  where
+    isHSpace c = c == ' ' || c == '\t'
+    isOperatorish t =
+         not (T.null t)
+      && T.all isOpChar t
+      && t `notElem` reservedSyntax
+    isOpChar c = c `elem` (":!#$%&*+./<=>?@\\^|-~" :: [Char])
+    -- Tokens made of operator characters that are reserved Haskell
+    -- syntax, not pattern names. Without this filter, 'pattern Empty
+    -- = []' would parse '=' as the operator and merge would break.
+    reservedSyntax = ["=", "<-", "::", "->", "|", "@"]
+
+-- | Merge pattern signatures (Map: name -> sig text + line) with
+-- pattern definitions. If both exist, render combined; if only one
+-- exists, render what we have.
+mergePatterns
+  :: [(Text, Int, Text)]  -- sigs
+  -> [(Text, Int, Text)]  -- binds
+  -> [Pattern]
+mergePatterns sigs binds =
+  let sigMap  = Map.fromList [ (n, (line, txt)) | (n, line, txt) <- sigs ]
+      bindMap = Map.fromList [ (n, (line, txt)) | (n, line, txt) <- binds ]
+      allNames = Map.keys (Map.union sigMap bindMap)
+      build name =
+        let mSig  = Map.lookup name sigMap
+            mBind = Map.lookup name bindMap
+            line = case (mSig, mBind) of
+              (Just (l, _), _)       -> l
+              (Nothing, Just (l, _)) -> l
+              _                      -> 0
+            verbatim = case (mSig, mBind) of
+              (Just (_, s), Just (_, b)) -> s <> "\n" <> b
+              (Just (_, s), Nothing)     -> s
+              (Nothing, Just (_, b))     -> b
+              _                          -> ""
+        in Pattern name verbatim line
+  in sortOn patSrcLine (map build allNames)
+
+------------------------------------------------------------------
+-- Fixity declarations
+------------------------------------------------------------------
+
+extractFixity :: [Text] -> LHsDecl GhcPs -> [Fixity]
+extractFixity sourceLines ldecl =
+  let sp = locA (getLoc ldecl)
+  in case unLoc ldecl of
+       SigD _ (FixSig _ _) ->
+         let verbatim = sliceSourceSpan sourceLines sp
+         in [ Fixity verbatim (fixityOpsFromSource verbatim) (startLine sp) ]
+       _ -> []
+
+-- | Parse 'infixr 5 <>, :<>, :|>' style declarations. We strip the
+-- direction keyword and precedence, then split the rest on commas.
+fixityOpsFromSource :: Text -> [Text]
+fixityOpsFromSource src =
+  let trimmed = T.strip src
+      afterKw = case asum [ T.stripPrefix kw trimmed | kw <- ["infixr", "infixl", "infix"] ] of
+        Just rest -> T.stripStart rest
+        Nothing   -> trimmed
+      afterPrec = T.dropWhile (\c -> c == ' ' || (c >= '0' && c <= '9'))
+                              (T.dropWhile (== ' ') afterKw)
+      ops = T.splitOn "," afterPrec
+  in filter (not . T.null) (map T.strip ops)
+  where
+    asum []     = Nothing
+    asum (x:xs) = case x of
+      Just _  -> x
+      Nothing -> asum xs
 
 ------------------------------------------------------------------
 -- Data, newtype, type, class, instance, type/data family
@@ -237,8 +370,7 @@ sliceFirstLine ls = \case
   UnhelpfulSpan _ -> ""
 
 ------------------------------------------------------------------
--- LANGUAGE pragma extraction (for chase output, separate from
--- the DynFlags update above)
+-- LANGUAGE pragma extraction (textual; for chase output only)
 ------------------------------------------------------------------
 
 pragmasFromSource :: Text -> [Text]

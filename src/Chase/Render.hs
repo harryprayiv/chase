@@ -11,10 +11,12 @@ renderChaseFile :: ChaseFile -> Text
 renderChaseFile ChaseFile{..} = T.unlines $
      header
   <> renderExtensions chaseExtensions
+  <> renderFixities   chaseFixities
   <> renderImports    chaseImports
   <> renderConstants  chaseConstants
   <> renderTopologies chaseTopologies
   <> renderDataDecls  chaseDataDecls
+  <> renderPatternsWithInvariants chasePatterns chaseInvariants
   <> renderSignaturesWithInvariants chaseSignatures chaseInvariants
   <> renderDecisions  chaseDecisions
   <> renderParseErrors chaseParseErrors
@@ -28,6 +30,13 @@ renderChaseFile ChaseFile{..} = T.unlines $
 renderExtensions :: [Text] -> [Text]
 renderExtensions [] = []
 renderExtensions xs = ["%ext " <> T.intercalate ", " xs, ""]
+
+-- | Fixity block. One line per fixity declaration, verbatim, indented
+-- under a %fixity heading. Placed right after %ext because it is
+-- meta-context — it tells the reader how operator-using code parses.
+renderFixities :: [Fixity] -> [Text]
+renderFixities [] = []
+renderFixities fs = "%fixity" : map (("  " <>) . fixVerbatim) fs <> [""]
 
 renderImports :: [Text] -> [Text]
 renderImports [] = []
@@ -53,7 +62,6 @@ renderConstants cs = map renderOne cs <> [""]
             [] -> ""
             ns -> "  -- " <> T.intercalate "; " (map renderNote ns)
       in "%const " <> constName <> " = " <> constValueDoc <> suffix
-
     renderNote (Note t)    = t
     renderNote (BugNote t) = "BUG: " <> t
 
@@ -70,25 +78,46 @@ renderTopologies tops = concatMap renderOne tops <> [""]
 
 renderDataDecls :: [ChaseDataDecl] -> [Text]
 renderDataDecls [] = []
-renderDataDecls ds = concatMap one ds <> [""]
+renderDataDecls ds = concatMap one ds
   where
     one ChaseDataDecl{..} = [cddVerbatim, ""]
 
--- | "!" lines are invariants. ">" lines are downstream consumers (docs
--- pointers, free-text). Both are indented two spaces under the type sig.
+-- | Pattern synonyms render verbatim (combined sig + def if both
+-- exist) followed by any invariants attached to the pattern name.
+-- Same lookup mechanism as signatures: invariants reference the
+-- pattern by its bare name.
+renderPatternsWithInvariants :: [Pattern] -> [Invariant] -> [Text]
+renderPatternsWithInvariants [] _ = []
+renderPatternsWithInvariants pats invs =
+  concatMap (renderPat invMap) pats
+  where
+    invMap = [(invFunction i, i) | i <- invs]
+    renderPat m Pattern{..} =
+      let attached = lookup patName m
+          extra = case attached of
+            Nothing -> []
+            Just Invariant{..} ->
+                 [ "  ! " <> l                | l <- invLines    ]
+              <> [ "  > consumed by: " <> c   | c <- invConsumes ]
+              <> case invBodyHint of
+                   Nothing -> []
+                   Just h  -> ["  " <> h]
+      in [patVerbatim] <> extra <> [""]
+
+-- | "!" lines are invariants. ">" lines are downstream consumers.
+-- Both indented under the type sig.
 renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
 renderSignaturesWithInvariants sigs invs =
   concatMap (renderSig invMap) sigs
   where
     invMap = [(invFunction i, i) | i <- invs]
-
     renderSig m Signature{..} =
       let attached = lookup sigName m
           extra = case attached of
             Nothing -> []
             Just Invariant{..} ->
-                 [ "  ! " <> l                 | l <- invLines    ]
-              <> [ "  > consumed by: " <> c    | c <- invConsumes ]
+                 [ "  ! " <> l                | l <- invLines    ]
+              <> [ "  > consumed by: " <> c   | c <- invConsumes ]
               <> case invBodyHint of
                    Nothing -> []
                    Just h  -> ["  " <> h]

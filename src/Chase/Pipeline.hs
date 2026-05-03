@@ -28,15 +28,9 @@ import Chase.Render
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
-    -- ^ source directories to walk, e.g. @["backend\/src"]@
   , cfgOutputDir   :: FilePath
-    -- ^ where to write per-file .chase output (used only when
-    --   cfgBundleFile is Nothing)
   , cfgBundleFile  :: Maybe FilePath
-    -- ^ if Just, write a single concatenated bundle to this path
-    --   instead of a per-file tree
   , cfgAnnotations :: Map Text ModuleAnnotations
-    -- ^ keyed by module name, e.g. @"DB.Auth"@
   , cfgVerbose     :: Bool
   }
 
@@ -53,8 +47,6 @@ runChase :: ChaseConfig -> IO ()
 runChase cfg@ChaseConfig{..} = case cfgBundleFile of
   Nothing      -> runPerFile cfg
   Just bundle  -> runBundled cfg bundle
-
--- per-file mode: original behavior, one .chase per source file -----------
 
 runPerFile :: ChaseConfig -> IO ()
 runPerFile ChaseConfig{..} = do
@@ -77,8 +69,6 @@ runPerFile ChaseConfig{..} = do
         createDirectoryIfMissing True (takeDirectory outPath)
         TIO.writeFile outPath rendered
         when cfgVerbose $ putStrLn $ "write  " <> outPath
-
--- bundled mode: one concatenated file with separators -------------------
 
 runBundled :: ChaseConfig -> FilePath -> IO ()
 runBundled ChaseConfig{..} bundlePath = do
@@ -128,9 +118,10 @@ renderPreamble roots ok failed = do
     , "# This file is a chase bundle: structural skeletons of multiple"
     , "# Haskell source files concatenated into one document. Each block"
     , "# begins with === BEGIN <path> === on its own line. Blocks contain"
-    , "# the rendered .chase format: %file, %mod, %uses, type signatures,"
-    , "# data declarations, and any attached invariants/decisions/"
-    , "# topologies. Function bodies are deliberately omitted; the lines"
+    , "# the rendered .chase format: %file, %mod, %ext, %fixity, %uses,"
+    , "# %const, %topology, data decls, %pattern, type signatures with"
+    , "# attached invariants and consumers, %decision blocks, and parse"
+    , "# errors. Function bodies are deliberately omitted; the lines"
     , "# beginning with ! after a signature are the behavioral facts you"
     , "# would otherwise have to infer from reading the source."
     , ""
@@ -156,8 +147,6 @@ renderFailureBlock roots src msg =
        , ""
        ]
 
--- shared helpers -------------------------------------------------------
-
 attachAnnotations
   :: Map Text ModuleAnnotations -> ChaseFile -> ChaseFile
 attachAnnotations annMap cf =
@@ -170,24 +159,27 @@ attachAnnotations annMap cf =
       , chaseTopologies = annTopologies
       }
 
--- | Find function names referenced by invariants or decisions
--- that don't actually exist in the parsed signatures. This is the
--- sidecar equivalent of compile-time function name checking: not
--- as strong, but caught early enough to fix.
+-- | Drift check: invariants and decision-affects names must point at
+-- something the parser actually found. Valid targets are signatures
+-- AND pattern synonyms (both can carry behavioral annotations).
+-- Class/instance heads, data decls, and constants are NOT valid drift
+-- targets here because invariants attach to functions and patterns
+-- only.
 checkAnnotationDrift :: ChaseFile -> [Text]
 checkAnnotationDrift ChaseFile{..} =
-  let sigNames    = map sigName chaseSignatures
+  let validNames  = map sigName chaseSignatures
+                 <> map patName chasePatterns
       invMissing  =
         [ "invariant references unknown function: " <> invFunction i
         | i <- chaseInvariants
-        , invFunction i `notElem` sigNames
+        , invFunction i `notElem` validNames
         ]
       decMissing  =
         [ "decision " <> decName d
             <> " references unknown function: " <> n
         | d <- chaseDecisions
         , n <- decAffects d
-        , n `notElem` sigNames
+        , n `notElem` validNames
         ]
   in invMissing <> decMissing
 

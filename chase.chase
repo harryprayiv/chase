@@ -1,14 +1,15 @@
 %bundle chase v1
-%generated 2026-05-03T14:57:15Z
+%generated 2026-05-03T15:51:19Z
 %roots /home/bismuth/git/chase/src
 %files 6 ok, 0 failed
 
 # This file is a chase bundle: structural skeletons of multiple
 # Haskell source files concatenated into one document. Each block
 # begins with === BEGIN <path> === on its own line. Blocks contain
-# the rendered .chase format: %file, %mod, %uses, type signatures,
-# data declarations, and any attached invariants/decisions/
-# topologies. Function bodies are deliberately omitted; the lines
+# the rendered .chase format: %file, %mod, %ext, %fixity, %uses,
+# %const, %topology, data decls, %pattern, type signatures with
+# attached invariants and consumers, %decision blocks, and parse
+# errors. Function bodies are deliberately omitted; the lines
 # beginning with ! after a signature are the behavioral facts you
 # would otherwise have to infer from reading the source.
 
@@ -38,7 +39,6 @@ data SpecEntry = SpecEntry
   }
 
 instance A.FromJSON SpecEntry where
-
 
 loadAnnotations
   :: FilePath -> IO (Either String (Map Text ModuleAnnotations))
@@ -130,6 +130,8 @@ parseTopology :: A.Value -> AT.Parser Topology
 %uses Data.Text
 %uses qualified Data.Text.Encoding as TE
 %uses qualified Data.ByteString as BS
+%uses Data.List
+%uses qualified Data.Map.Strict as Map
 %uses GHC.Data.FastString
 %uses GHC.Data.StringBuffer
 %uses qualified GHC.Settings as Settings
@@ -159,7 +161,6 @@ data ParseFailure = ParseFailure
   , pfMsg  :: Text
   }
 
-
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
   ! intent: Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic
   ! effects: IO
@@ -185,10 +186,10 @@ extractStructure
   ! produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls
   ! constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations
 
+renderParseError :: PState -> Text
+
 moduleNameOf :: HsModule GhcPs -> Text
   ! returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)
-
-renderParseError :: PState -> Text
 
 importsOf :: HsModule GhcPs -> [Text]
   ! pretty-prints each import via GHC's Outputable; the renderer in Chase.Render then collapses whitespace and strips the explicit name list
@@ -206,6 +207,21 @@ extractClassSig :: [Text] -> LSig GhcPs -> [Signature]
 sigToSignatures :: [Text] -> SrcSpan -> Sig GhcPs -> [Signature]
   ! handles both TypeSig (top-level and most class methods) and ClassOpSig (class methods with default signatures)
   ! other Sig variants (specialise pragmas, fixity declarations, deprecation warnings) deliberately produce no Signature; only type signatures are tracked
+
+extractPatternSig :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
+
+extractPatternBind :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
+
+patternNameFromSource :: Text -> Maybe Text
+
+mergePatterns
+  :: [(Text, Int, Text)]  -- sigs
+  -> [(Text, Int, Text)]  -- binds
+  -> [Pattern]
+
+extractFixity :: [Text] -> LHsDecl GhcPs -> [Fixity]
+
+fixityOpsFromSource :: Text -> [Text]
 
 extractDataDecl :: [Text] -> LHsDecl GhcPs -> [ChaseDataDecl]
   ! covers DataDecl, SynDecl, ClassDecl, FamDecl, and the InstD ClsInstD case
@@ -291,18 +307,11 @@ probedToolSettings :: Settings.ToolSettings
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
-    -- ^ source directories to walk, e.g. @["backend\/src"]@
   , cfgOutputDir   :: FilePath
-    -- ^ where to write per-file .chase output (used only when
-    --   cfgBundleFile is Nothing)
   , cfgBundleFile  :: Maybe FilePath
-    -- ^ if Just, write a single concatenated bundle to this path
-    --   instead of a per-file tree
   , cfgAnnotations :: Map Text ModuleAnnotations
-    -- ^ keyed by module name, e.g. @"DB.Auth"@
   , cfgVerbose     :: Bool
   }
-
 
 defaultConfig :: ChaseConfig
   ! all fields default to empty/Nothing/False
@@ -386,6 +395,8 @@ renderChaseFile :: ChaseFile -> Text
 
 renderExtensions :: [Text] -> [Text]
 
+renderFixities :: [Fixity] -> [Text]
+
 renderImports :: [Text] -> [Text]
   ! drops the leading 'import' keyword (every line starts with the module name)
   ! filters out any import that collapses to empty (defensive)
@@ -401,6 +412,8 @@ renderConstants :: [Constant] -> [Text]
 renderTopologies :: [Topology] -> [Text]
 
 renderDataDecls :: [ChaseDataDecl] -> [Text]
+
+renderPatternsWithInvariants :: [Pattern] -> [Invariant] -> [Text]
 
 renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
   ! ORDER per signature: signature verbatim, then '!' lines (invariants), then '>' lines (consumed by), then optional hint, then blank line
@@ -432,6 +445,8 @@ renderParseErrors :: [Text] -> [Text]
 %file /home/bismuth/git/chase/src/Chase/Types.hs
 %mod Chase.Types
 
+%ext DeriveGeneric, DeriveAnyClass, DerivingStrategies
+
 %uses Data.Text
 %uses GHC.Generics
 
@@ -439,8 +454,10 @@ data ChaseFile = ChaseFile
   { chaseSourcePath  :: FilePath
   , chaseModuleName  :: Text
   , chaseExtensions  :: [Text]
+  , chaseFixities    :: [Fixity]
   , chaseImports     :: [Text]
   , chaseSignatures  :: [Signature]
+  , chasePatterns    :: [Pattern]
   , chaseDataDecls   :: [ChaseDataDecl]
   , chaseConstants   :: [Constant]
   , chaseInvariants  :: [Invariant]
@@ -454,6 +471,20 @@ data Signature = Signature
   { sigName     :: Text
   , sigVerbatim :: Text
   , sigSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
+data Pattern = Pattern
+  { patName     :: Text
+  , patVerbatim :: Text
+  , patSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
+data Fixity = Fixity
+  { fixVerbatim :: Text
+  , fixOps      :: [Text]
+  , fixSrcLine  :: Int
   }
   deriving stock (Show, Generic)
 
@@ -506,7 +537,6 @@ data Topology = Topology
   }
   deriving stock (Show, Generic)
 
-
 emptyChaseFile :: FilePath -> ChaseFile
   ! all annotation fields default to empty; structural fields are filled in by Chase.Parse.extractStructure
   ! chaseSourcePath is the only field set at construction; everything else is added later
@@ -514,6 +544,10 @@ emptyChaseFile :: FilePath -> ChaseFile
 emptyAnnotations :: Text -> ModuleAnnotations
   ! annModName is set; the four annotation lists default to empty
   ! callers add fields by record update
+
+constNote :: Text -> Note
+
+constBug :: Text -> Note
 
 inv :: Text -> [Text] -> Invariant
   ! smart constructor that defaults invConsumes to [] and invBodyHint to Nothing
@@ -523,10 +557,6 @@ inv :: Text -> [Text] -> Invariant
 invHinted :: Text -> [Text] -> Text -> Invariant
   ! smart constructor that defaults invConsumes to [] but sets invBodyHint
   ! no current code path constructs an Invariant with both consumes and a body hint via a smart constructor; record syntax is required for that combination
-
-constNote :: Text -> Note
-
-constBug :: Text -> Note
 
 decision :: Text -> Text -> Text -> [Text] -> Decision
   ! positional smart constructor matching the Decision data constructor field order
