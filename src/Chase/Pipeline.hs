@@ -171,7 +171,7 @@ attachAnnotations annMap cf =
       }
 
 -- | Find function names referenced by invariants or decisions
--- that don\'t actually exist in the parsed signatures. This is the
+-- that don't actually exist in the parsed signatures. This is the
 -- sidecar equivalent of compile-time function name checking: not
 -- as strong, but caught early enough to fix.
 checkAnnotationDrift :: ChaseFile -> [Text]

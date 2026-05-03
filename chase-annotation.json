@@ -57,80 +57,127 @@
     "Chase.Parse": {
       "decisions": [
         {
-          "name": "ParserIsHaskellSrcExtsNotGHC",
-          "what": "Use haskell-src-exts plus a manual fixity and extension list",
+          "name": "ParserIsGhcLibParser",
+          "what": "Use ghc-lib-parser as the parser; no manual fixity or extension list",
           "why": [
-            "haskell-src-exts is small, pure, and has a stable AST. ghc-lib-parser is the actual GHC frontend but pulls in hundreds of MB of transitive deps and a much larger AST.",
-            "Trade-off: any GHC syntax newer than the haskell-src-exts release will fail to parse. The README documents the parse-failure escape hatch (skip the file, keep going).",
-            "If parse failures exceed ~10% of files in a real codebase, the answer is to switch parsers, not to keep extending these lists."
+            "ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions.",
+            "The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax.",
+            "ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks.",
+            "Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state."
           ],
-          "affects": ["parseSourceFile", "commonOperatorFixities"]
+          "affects": ["parseSourceFile"]
+        },
+        {
+          "name": "PragmasReadFromSourceTextNotAst",
+          "what": "LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST",
+          "why": [
+            "GHC parses pragmas before the module body, so they do not appear in hsmodDecls.",
+            "Reading them off the source text directly is cheaper, more direct, and survives any AST shape change in future ghc-lib-parser versions.",
+            "The scan stops at the first non-blank, non-comment, non-pragma line, so it never reads past the preamble."
+          ],
+          "affects": ["pragmasFromSource"]
+        },
+        {
+          "name": "HeadOnlyForClassAndInstance",
+          "what": "ClassDecl and InstDecl render only the head line, not the body",
+          "why": [
+            "Class bodies are method signatures, already extracted separately by extractSignatures. Rendering the body in extractDataDecl would duplicate them.",
+            "Instance bodies are method definitions. chase deliberately drops function bodies everywhere else, so dropping instance method bodies is consistent.",
+            "For deeply-indented class or instance declarations spanning many lines, this also reduces token count substantially."
+          ],
+          "affects": ["extractDataDecl", "sliceFirstLine"]
+        },
+        {
+          "name": "ExtensionImplicationsAppliedExplicitly",
+          "what": "TemplateHaskell -> TemplateHaskellQuotes is applied by hand in applySourcePragmas",
+          "why": [
+            "ghc-lib-parser's xopt_set sets exactly the named extension bit. It does NOT walk impliedXFlags, the table that says 'enabling X also enables Y'.",
+            "GHC's own driver expands implications before handing flags to the parser; in our parser-only call path, no driver runs, so implications would silently fail to apply.",
+            "Symptom of NOT applying this implication: files using $(...) splices fail with 'parse error on input `$`' even when -XTemplateHaskell is in the source. The `$` lexer rule is gated on TemplateHaskellQuotesBit, not TemplateHaskellBit.",
+            "Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface."
+          ],
+          "affects": ["applySourcePragmas"]
         }
       ],
       "invariants": {
         "parseSourceFile": {
-          "intent": "Parse one .hs file, return either a structural skeleton or a diagnostic",
+          "intent": "Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic",
           "effects": ["IO"],
           "notes": [
-            "reads the file twice: once into Text for source-span slicing, once via parseFileWithMode internally",
+            "reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer",
+            "applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts",
             "ParseFailure is data, not an exception; the caller decides whether to skip or abort",
-            "fixities = Just (baseFixities <> commonOperatorFixities); without this many infix-heavy files fail with 'ambiguous infix expression'"
+            "GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required"
           ],
           "consumes": [
             "Chase.Pipeline.runPerFile (skip-and-continue on failure)",
             "Chase.Pipeline.runBundled (records failure in preamble counter, emits %parse_error block)"
           ]
         },
-        "commonOperatorFixities": [
-          "covers lens, microlens, profunctors, aeson, and servant operators",
-          "the symptom of a missing entry is 'ambiguous infix expression' from haskell-src-exts on a specific file"
-        ],
         "extractStructure": [
-          "only handles Module; XmlPage and XmlHybrid silently produce an empty ChaseFile"
+          "produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls",
+          "constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations"
+        ],
+        "applySourcePragmas": {
+          "intent": "Read LANGUAGE pragmas from source via getOptions, apply each to DynFlags, return the updated flags",
+          "notes": [
+            "must run BEFORE initParserOpts; the parser snapshots ExtBits at construction time",
+            "getOptions takes (ParserOpts, [String] supportedExts, StringBuffer, FilePath) - the supported list comes from supportedLanguagesAndExtensions applied to platformArchOS genericPlatform",
+            "TemplateHaskell is special-cased to ALSO set TemplateHaskellQuotes; xopt_set does not walk impliedXFlags, and the `$` lexer rule is gated on TemplateHaskellQuotesBit (not TemplateHaskellBit)",
+            "OPTIONS_GHC and -W flags returned by getOptions are silently dropped by parseExtensionFlag",
+            "extension names that aren't in LangExt.Extension fall through silently"
+          ]
+        },
+        "moduleNameOf": [
+          "returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)"
+        ],
+        "importsOf": [
+          "pretty-prints each import via GHC's Outputable; the renderer in Chase.Render then collapses whitespace and strips the explicit name list"
         ],
         "extractSignatures": {
           "notes": [
-            "extracts top-level TypeSig declarations AND class method signatures (recursing through ClassDecl > ClsDecl > Decl)",
-            "class methods are emitted with UNQUALIFIED names — same shape as top-level signatures — so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name",
-            "default-method ClsDefSig and other future sig-bearing class body variants would be added in extractClassMethodSig in one place"
+            "extracts top-level TypeSig declarations AND class method signatures",
+            "ClassDecl bodies have their tcdSigs walked separately by extractClassSig; both top-level and class-method sigs end up in the same flat [Signature] list",
+            "class methods are emitted with UNQUALIFIED names, same shape as top-level signatures, so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name"
           ],
           "consumes": [
             "Chase.Render.renderSignaturesWithInvariants (the renderer assumes one Signature per top-level OR class-method binding)"
           ]
         },
-        "extractClassMethodSig": [
-          "pulls TypeSig out of a class body via ClsDecl unwrapping",
-          "delegates back to extractSignatures so any sig-bearing case added there is automatically picked up here too"
+        "extractClassSig": [
+          "called per LSig in a class body's tcdSigs list",
+          "delegates to sigToSignatures so any new sig variant only needs to be added in one place"
         ],
-        "extractChaseDataDecl": {
-          "notes": [
-            "covers DataDecl, GDataDecl, TypeDecl, ClassDecl, InstDecl, TypeFamDecl, DataFamDecl, ClosedTypeFamDecl",
-            "DataDecl/GDataDecl/TypeDecl/TypeFamDecl/DataFamDecl/ClosedTypeFamDecl render their full source span verbatim (the body IS the signature)",
-            "ClassDecl and InstDecl render only the HEAD line via sliceFirstLine; class bodies are method sigs (extracted separately by extractSignatures), instance bodies are method defs (deliberately dropped). Head-only also dodges a haskell-src-exts span quirk where a class/instance span can over-extend into the following top-level declaration",
-            "InstDecl uses the head class name as the identifier (e.g. 'Show' for `instance Show Foo`)",
-            "DerivingDecl (standalone deriving) is NOT covered"
-          ]
-        },
-        "instRuleName": [
-          "extracts the head class name from an InstRule for use as a printable identifier",
-          "instances do not have a single name in the language sense; this returns something useful for drift-check messages and rendered output without being load-bearing"
+        "sigToSignatures": [
+          "handles both TypeSig (top-level and most class methods) and ClassOpSig (class methods with default signatures)",
+          "other Sig variants (specialise pragmas, fixity declarations, deprecation warnings) deliberately produce no Signature; only type signatures are tracked"
         ],
-        "instHeadName": [
-          "walks an InstHead, peeling IHParen and IHApp wrappers to find the head class name"
+        "extractDataDecl": [
+          "covers DataDecl, SynDecl, ClassDecl, FamDecl, and the InstD ClsInstD case",
+          "DataDecl, SynDecl, FamDecl render their full source span verbatim (the body IS the signature - constructors, type equation, kind, family equations)",
+          "ClassDecl and InstDecl render only the HEAD line via sliceFirstLine; see decision HeadOnlyForClassAndInstance",
+          "InstDecl uses the pretty-printed instance head as the cdd identifier (e.g. 'A.FromJSON SpecEntry') because instances do not have a single language-level name"
         ],
-        "qNameText": [
-          "renders a QName as 'Mod.Name' (Qual), 'Name' (UnQual), or '<special>' (Special)",
-          "Special covers tuple constructors, list constructor, etc.; if one shows up as an instance head class name (it shouldn't in well-formed code) the placeholder is visible rather than crashing"
+        "rdrNameToText": [
+          "extracts the OccName String from a parse-phase RdrName via rdrNameOcc, then T.pack",
+          "produces the unqualified identifier as written in source"
         ],
         "sliceSourceSpan": [
           "1-indexed line slicing using the SrcSpan from the parser",
           "trusts the span; no bounds checking against the file length",
-          "if a span is malformed the result is a possibly-truncated string, never a crash, because take/drop on lists are total"
+          "if a span is malformed the result is a possibly-truncated string, never a crash, because take/drop on lists are total",
+          "spans without real loc info (UnhelpfulSpan) return empty string"
         ],
         "sliceFirstLine": [
           "returns ONLY the starting line of a source span, no body",
-          "used for ClassDecl and InstDecl where rendering the body is undesirable AND the haskell-src-exts span can over-extend past the actual end of the declaration",
-          "without this, an instance's source span can absorb the next top-level signature into its rendered block"
+          "used for ClassDecl and InstDecl heads where the body is undesirable",
+          "spans without real loc info return empty string"
+        ],
+        "pragmasFromSource": [
+          "purely textual scan of the source preamble; does not touch the AST",
+          "stops at the first non-blank, non-comment, non-pragma line",
+          "extracts comma-separated extension lists from {-# LANGUAGE Foo, Bar #-} blocks",
+          "OPTIONS_GHC and other non-LANGUAGE pragmas are ignored"
         ]
       }
     },
