@@ -23,13 +23,19 @@ actually matters.
 
 ## What it does, mechanically
 
-For each Haskell source file, `chase` parses with `haskell-src-exts` and
-extracts:
+For each Haskell source file, `chase` parses with `ghc-lib-parser` (GHC's
+own parser, exposed as a library) and extracts:
 
 - module name and language pragmas
 - import declarations (collapsed to one line each, no name lists)
-- type signatures (verbatim from source span)
-- data, newtype, and type declarations (verbatim from source span)
+- type signatures, both top-level and class methods (verbatim from source
+  span)
+- data, newtype, type alias, type family, data family, and closed type
+  family declarations (verbatim from source span)
+- class declarations (head only; method signatures are extracted
+  separately as type signatures)
+- instance declarations (head only; bodies are method definitions, which
+  chase deliberately drops)
 
 Function bodies are dropped entirely. The module skeleton that remains is
 typically 3x to 10x smaller than the original source.
@@ -202,22 +208,49 @@ is more useful than `"App.cookieAuthMiddleware"` alone.
 Do not annotate everything before testing. The format and the kinds of
 invariants worth recording will both shift after the first real test.
 
+## Parser notes
+
+The parser is `ghc-lib-parser`, a snapshot of GHC's own frontend exposed
+as a library. This means chase parses any syntax GHC parses: GADT-style
+data declarations with inline kind signatures, `effectful`-style
+`data X :: Effect where`, modern type and data families, standalone kind
+signatures, TemplateHaskell splices and quasi-quoted decl blocks, and
+forward-compatible language extensions. No fixity table or extension
+allowlist is maintained; GHC's parser handles those internally.
+
+The version of Haskell that chase parses is determined by which version
+of `ghc-lib-parser` cabal resolves at build time. The cabal-version
+constraints leave the upper bound generous so a fresh `cabal build`
+picks up whatever current `ghc-lib-parser` is published.
+`ghc-lib-parser` tracks GHC by roughly one month, which is the closest
+a parsing-only tool gets to "always works on whatever GHC syntax you
+use."
+
+Source-level `LANGUAGE` pragmas are read out of the file header and
+applied to the parser's `DynFlags` before parsing. Without this step,
+extensions like `TemplateHaskell` and `QuasiQuotes` would be ignored
+even when the file declares them, since the parser's lexer rules for
+syntactic extensions are gated on flags rather than always active.
+
+There is one extension implication that chase applies by hand:
+`TemplateHaskell` enables `TemplateHaskellQuotes` as well. GHC's normal
+driver walks the `impliedXFlags` table to expand these implications,
+but `xopt_set` in `ghc-lib-parser` only flips the named bit and does
+not walk implications. The `$` lexer rule for splices is gated on
+`TemplateHaskellQuotesBit`, not `TemplateHaskellBit`, so without this
+explicit implication walk, files using `$( ... )` splices would fail
+with "parse error on input \`$\`" despite their `LANGUAGE
+TemplateHaskell` pragma. If you ever hit a similar parse failure on a
+file whose `LANGUAGE` pragmas look correct, the same kind of fix
+applies: find which extension bit the lexer rule actually checks, and
+add it as a side effect of enabling the extension that should imply
+it.
+
+If a file does fail to parse, chase reports the exact diagnostic from
+GHC's parser and continues with the rest of the bundle. Failures are
+counted in the bundle preamble (`%files N ok, M failed`).
+
 ## Limitations to know about
-
-`haskell-src-exts` is the parser. It is not GHC. Specifically:
-
-- It does not understand all modern GHC extensions. `OverloadedRecordDot`,
-  recent kind-signature syntax, and a handful of others can cause parse
-  failures. Files that fail to parse are reported and skipped; the bundle
-  still generates from the rest.
-- It needs operator fixities to disambiguate infix chains. The
-  `commonOperatorFixities` list in `Chase.Parse` covers `lens`, `aeson`,
-  and `servant` operators. If you hit "ambiguous infix expression" on a
-  file, the operator in question needs to be added to that list.
-- When the parse failure rate becomes painful (more than ~10% of your
-  files), the move is to switch the parser to `ghc-lib-parser`. That's
-  the actual GHC frontend exposed as a library and parses anything GHC
-  parses. The cost is a much larger dependency and a different AST shape.
 
 The output is not source. You cannot regenerate the codebase from a
 `.chase` file. It is a description, not a definition. If anyone treats it
@@ -239,6 +272,16 @@ executables — e.g. an app entry point and a one-shot bootstrap) collide
 on the same key. The current workaround is to leave the secondary main
 unannotated. The fix is to key annotations by file path instead, which
 would be a backwards-compatible addition.
+
+Class and instance declarations render only their head line in the
+`data decls` section. Class method signatures are extracted separately
+as top-level signatures and appear in the signatures section. Instance
+method bodies are dropped, consistent with how chase treats function
+bodies elsewhere.
+
+Standalone deriving declarations and pattern synonym declarations are
+not currently extracted. If a module's public surface depends on
+either, that surface will not appear in chase output.
 
 ## Why this and not Haddock?
 
@@ -271,11 +314,23 @@ The flake provides a GHC 9.10 dev shell:
 
 ## Status
 
-Working tool, tested on Cheeblr (a real Haskell codebase of
-~9,000 lines). Format is a draft and will change. The annotation API has
-already grown once (the `consumes` field was added after the first round
-of real LLM smoke tests showed which kinds of cross-module reasoning the
-`!`-only format wasn't pulling weight on) and is likely to grow again.
+Working tool. Tested on three real codebases:
+
+- chase itself (6/6 modules ok, fully self-annotated)
+- cheeblr (66/66 modules ok, ~9,000 lines, includes crem state
+  machines with TemplateHaskell-driven singletons and aeson-TH JSON
+  derivation)
+- pelotero-engine (49/49 modules ok, heavy `effectful` usage with
+  GADT-style effect declarations)
+
+Format is a draft and will change. The annotation API has already grown
+twice. The `consumes` field was added after the first round of real LLM
+smoke tests showed which kinds of cross-module reasoning the `!`-only
+format wasn't pulling weight on. The parser was switched from
+`haskell-src-exts` to `ghc-lib-parser` after the former failed on 33%
+of pelotero-engine files due to GADT-style `data X :: Effect where`
+declarations and on cheeblr's TemplateHaskell-using state machine
+modules.
 
 Honest open questions:
 
@@ -288,7 +343,8 @@ Honest open questions:
 - Whether the next move is to extend annotations further (cross-module
   drift checking for `consumes`, file-path keying to handle `Main`
   collisions, structured rejected-alternatives in decisions, decision
-  dates) or to switch the parser to `ghc-lib-parser` for a fuller
-  AST-driven extraction that could derive some of this automatically.
+  dates) or to extract more from the AST automatically (deriving
+  clauses, pattern synonyms, fixity declarations, class/instance method
+  bodies for callers who actually want them).
 
 Open to issues and PRs from anyone using this on their own code.
