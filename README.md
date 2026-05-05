@@ -12,13 +12,13 @@ you left out. Both fail in different ways.
 `chase` is a third option. It reads your Haskell source files and emits a
 compressed representation that preserves the things an LLM cannot reconstruct
 from a type signature (architectural decisions, behavioral invariants, state
-machine topologies, magic constants, downstream dependents) while dropping
-the things it can (function bodies, import name lists, boilerplate). The
-result is a single text file you paste into a fresh conversation that gives
-the model substantially more useful context per token than either source or
-hand-written summaries.
+machine topologies, magic constants, downstream dependents, known problems)
+while dropping the things it can (function bodies, import name lists,
+boilerplate). The result is a single text file you paste into a fresh
+conversation that gives the model substantially more useful context per
+token than either source or hand-written summaries.
 
-The name comes from "cut to the chase" — skip the preamble, get to what
+The name comes from "cut to the chase": skip the preamble, get to what
 actually matters.
 
 ## What it does, mechanically
@@ -28,8 +28,11 @@ own parser, exposed as a library) and extracts:
 
 - module name and language pragmas
 - import declarations (collapsed to one line each, no name lists)
+- fixity declarations (verbatim, including precedence and associativity)
 - type signatures, both top-level and class methods (verbatim from source
   span)
+- pattern synonym declarations (signature and definition merged when both
+  exist, otherwise whichever is present)
 - data, newtype, type alias, type family, data family, and closed type
   family declarations (verbatim from source span)
 - class declarations (head only; method signatures are extracted
@@ -48,14 +51,17 @@ For modules with annotations, `chase` also attaches:
 - `>` consumed-by lines pointing at downstream code that depends on the
   function or its observable side effects
 - `%decision` blocks recording first-class architectural decisions
+- `%open_issue` blocks recording known problems with `blocking` and
+  `affects` targets, distinct from settled decisions
 - `%topology` blocks for state machines (intended for crem state machines
   but works for anything with a fixed transition graph)
 
 Annotations live in a single JSON file alongside your `.cabal` file. They
 are not stored in source comments. This is deliberate: it keeps source
-clean, lets the chase library validate that invariants and decision
-`affects` lists reference real functions, and lets you version annotations
-independently of the code they describe.
+clean, lets the chase library validate that invariants, decision
+`affects` lists, and open-issue `affects` lists reference real
+functions, and lets you version annotations independently of the code
+they describe.
 
 ## Output formats
 
@@ -105,6 +111,19 @@ A JSON file keyed by module name:
           "affects": ["createSession", "lookupSession", "rotateSessionToken"]
         }
       ],
+      "openIssues": [
+        {
+          "name": "RotationRaceWindow",
+          "what": "Two concurrent requests can both see the pre-rotation token between issuance and DB commit",
+          "why": [
+            "rotateSessionToken issues the new token before the prior row is invalidated.",
+            "Window is bounded by network latency between client and Postgres but is not zero.",
+            "Acceptable today because all callers of lookupSession run inside the same transaction; not acceptable if a future caller starts a separate Read Committed read."
+          ],
+          "blocking": ["multi-region replica reads"],
+          "affects": ["rotateSessionToken", "lookupSession"]
+        }
+      ],
       "invariants": {
         "hashPassword": [
           "16-byte salt from getEntropy",
@@ -122,7 +141,7 @@ A JSON file keyed by module name:
             { "input": "lookupSession pool revokedToken", "expected": "Nothing" }
           ],
           "consumes": [
-            "App.cookieAuthMiddleware (every authenticated request — hot path)",
+            "App.cookieAuthMiddleware (every authenticated request, hot path)",
             "Server.Admin.buildSessionInfos via SessionInfo.siLastSeen",
             "the last_seen_at write specifically: any worker reading idle sessions"
           ]
@@ -144,7 +163,16 @@ verbatim) or an object with structured fields:
 - `hint` becomes the optional escape-hatch line like `body: ~30 lines`
 
 Decision `why` accepts either a string or an array of strings; arrays are
-joined with spaces and rendered on a single line.
+joined with spaces and rendered on a single line. The `affects` array is
+drift-checked against the module's signatures and pattern synonyms.
+
+Open issues use the same `name`, `what`, `why`, `affects` shape as
+decisions plus an additional `blocking` array. `affects` is drift-checked
+against same-file signatures and patterns. `blocking` is free text and is
+deliberately not drift-checked: it commonly names downstream services,
+features, or executables rather than functions in the same module.
+Both `blocking` and `affects` are optional and are omitted from the
+rendered output if empty.
 
 ## What goes in a good annotation
 
@@ -189,6 +217,34 @@ function names. Parenthetical context is encouraged when it sharpens the
 relationship: `"App.cookieAuthMiddleware (every authenticated request)"`
 is more useful than `"App.cookieAuthMiddleware"` alone.
 
+The bar for an `openIssue` is "this currently doesn't work right, or works
+with a caveat the reader needs to know about, and is not yet resolved."
+The distinguishing feature is that an open issue is a problem you have not
+fixed. Decisions describe settled tradeoffs you would defend. Invariants
+describe how the code currently behaves, factually. Open issues describe
+broken or incomplete behavior that callers need to plan around. Examples:
+
+- a known correctness gap that hasn't been prioritized yet (current
+  lineup applied retroactively to historical data, idempotency-by-checksum
+  not wired even though the schema supports it)
+- a partial-function bug that hasn't bitten yet because of a precondition
+  upstream (T.head on what is currently always a single-character Text)
+- an N+M query pattern that's acceptable today but will need to be
+  joined when traffic grows
+- a string-encoding contract that crosses module boundaries with no type
+  to enforce it (the kind of thing that breaks silently when one side
+  changes)
+
+The `blocking` field captures what an open issue is blocking downstream:
+features, executables, services, deployment scenarios. If the blocking
+list is empty, the issue exists but isn't currently in anyone's way; it's
+documentation of a known limitation rather than a roadmap item. The
+`affects` field stays drift-checked against same-file signatures and
+patterns, same as a decision's affects.
+
+If a thing is fixed, delete the open issue. The annotation file is not an
+archive.
+
 ## Recommended workflow
 
 1. Run the bare extractor first. Read the `.chase` output as if you'd never
@@ -203,7 +259,10 @@ is more useful than `"App.cookieAuthMiddleware"` alone.
    facts, that's a sign you need a sharper invariant or a `consumes`
    pointer. If the LLM cites your invariants by name, the annotation is
    doing its job.
-5. Repeat for the next priority module.
+5. When you find a problem mid-development that you can't fix immediately,
+   add an `openIssue` instead of a TODO comment in source. The next LLM
+   session will see it; future you will too.
+6. Repeat for the next priority module.
 
 Do not annotate everything before testing. The format and the kinds of
 invariants worth recording will both shift after the first real test.
@@ -224,7 +283,11 @@ constraints leave the upper bound generous so a fresh `cabal build`
 picks up whatever current `ghc-lib-parser` is published.
 `ghc-lib-parser` tracks GHC by roughly one month, which is the closest
 a parsing-only tool gets to "always works on whatever GHC syntax you
-use."
+use." The other side of that coin: `ghc-lib-parser` minor releases
+occasionally rename or drop fields on internal types like
+`GHC.Settings.Settings`. These breaks are small and surface as compile
+errors in the parser-setup code; treat each one as a single-PR fix
+rather than a reason to vendor or pin.
 
 Source-level `LANGUAGE` pragmas are read out of the file header and
 applied to the parser's `DynFlags` before parsing. Without this step,
@@ -264,11 +327,14 @@ The drift checker is a sanity net, not a verifier.
 `consumes` is not drift-checked. Validating it would require gathering
 signatures from every parsed file before checking any single file's
 annotations; today the drift checker runs per-file. Cross-module
-consumer references rot silently.
+consumer references rot silently. Open-issue `blocking` entries are
+intentionally not drift-checked either, for the same reason but with a
+different rationale: they commonly name downstream services or features
+that aren't functions at all.
 
 Module names are the annotation key. Two source files declaring
 `module Main where` (typical for cabal projects with multiple
-executables — e.g. an app entry point and a one-shot bootstrap) collide
+executables, e.g. an app entry point and a one-shot bootstrap) collide
 on the same key. The current workaround is to leave the secondary main
 unannotated. The fix is to key annotations by file path instead, which
 would be a backwards-compatible addition.
@@ -279,9 +345,9 @@ as top-level signatures and appear in the signatures section. Instance
 method bodies are dropped, consistent with how chase treats function
 bodies elsewhere.
 
-Standalone deriving declarations and pattern synonym declarations are
-not currently extracted. If a module's public surface depends on
-either, that surface will not appear in chase output.
+Standalone deriving declarations (`deriving instance Show Foo`) are not
+currently extracted. If a module's public surface depends on standalone
+deriving, that surface will not appear in chase output.
 
 ## Why this and not Haddock?
 
@@ -324,13 +390,18 @@ Working tool. Tested on three real codebases:
   GADT-style effect declarations)
 
 Format is a draft and will change. The annotation API has already grown
-twice. The `consumes` field was added after the first round of real LLM
-smoke tests showed which kinds of cross-module reasoning the `!`-only
-format wasn't pulling weight on. The parser was switched from
+three times. The `consumes` field was added after the first round of real
+LLM smoke tests showed which kinds of cross-module reasoning the
+`!`-only format wasn't pulling weight on. The parser was switched from
 `haskell-src-exts` to `ghc-lib-parser` after the former failed on 33%
 of pelotero-engine files due to GADT-style `data X :: Effect where`
 declarations and on cheeblr's TemplateHaskell-using state machine
-modules.
+modules. The `openIssues` annotation type was added after annotating
+pelotero-engine surfaced enough known-bad behaviors that mixing them
+into `decisions` as TODO-flavored entries was making the decision list
+incoherent: decisions are settled tradeoffs you would defend, open
+issues are unresolved problems, and the `blocking` field on open issues
+captures something decisions don't have a slot for.
 
 Honest open questions:
 
@@ -343,8 +414,8 @@ Honest open questions:
 - Whether the next move is to extend annotations further (cross-module
   drift checking for `consumes`, file-path keying to handle `Main`
   collisions, structured rejected-alternatives in decisions, decision
-  dates) or to extract more from the AST automatically (deriving
-  clauses, pattern synonyms, fixity declarations, class/instance method
-  bodies for callers who actually want them).
+  dates) or to extract more from the AST automatically (standalone
+  deriving declarations, class/instance method bodies for callers who
+  actually want them).
 
 Open to issues and PRs from anyone using this on their own code.
