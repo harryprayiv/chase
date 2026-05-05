@@ -18,10 +18,9 @@ import GHC.Data.FastString       (mkFastString)
 import GHC.Data.StringBuffer     (StringBuffer, stringToStringBuffer)
 import qualified GHC.Settings    as Settings
 import GHC.Settings.Config       (cProjectVersion)
-import GHC.Platform              (genericPlatform, platformArchOS)
-import GHC.Driver.Session        (DynFlags, defaultDynFlags, xopt_set, supportedLanguagesAndExtensions)
+import GHC.Platform              (genericPlatform)
+import GHC.Driver.Session        (DynFlags, defaultDynFlags, xopt_set)
 import GHC.Fingerprint           (fingerprint0)
-import GHC.Unit.Types            (stringToUnitId)
 import GHC.Driver.Config.Parser  (initParserOpts)
 import qualified GHC.LanguageExtensions as LangExt
 import GHC.Parser                (parseModule)
@@ -73,7 +72,7 @@ parseSourceFile path = do
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
 applySourcePragmas path buf df0 =
   let initialOpts       = initParserOpts df0
-      (_warns, locOpts) = getOptions initialOpts (supportedLanguagesAndExtensions (platformArchOS genericPlatform)) buf path
+      (_warns, locOpts) = getOptions initialOpts buf path
       flagStrings       = map unLoc locOpts
   in foldl' applyOne df0 flagStrings
   where
@@ -169,14 +168,6 @@ sigToSignatures sourceLines sp = \case
 -- Pattern synonyms (definitions and signatures, merged by name)
 ------------------------------------------------------------------
 
--- | Extract pattern synonym TYPE SIGNATURES (PatSynSig). These can
--- appear separately from the pattern definition, e.g.:
---
---     pattern Foo :: Int -> Maybe Int
---     pattern Foo n = Just n
---
--- This function picks up only the signature line; extractPatternBind
--- picks up the definition; mergePatterns combines them.
 extractPatternSig :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
 extractPatternSig sourceLines ldecl =
   let sp = locA (getLoc ldecl)
@@ -189,10 +180,6 @@ extractPatternSig sourceLines ldecl =
          | n <- names ]
        _ -> []
 
--- | Extract pattern synonym DEFINITIONS (PatSynBind inside a ValD).
--- We render the whole binding via the AST's pp instance and pull the
--- pattern name out of the rendered text. This dodges version-specific
--- field-name access on PatSynBind, which is a moving target.
 extractPatternBind :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
 extractPatternBind sourceLines ldecl =
   let sp = locA (getLoc ldecl)
@@ -207,13 +194,6 @@ extractPatternBind sourceLines ldecl =
          _ -> []
        _ -> []
 
--- | Pull the pattern name out of a rendered pattern synonym binding.
--- Handles three source shapes:
---   pattern Foo ...          -- alphabetic, prefix
---   pattern (:<<) ...        -- operator, parenthesized (always for sigs)
---   pattern x :<< xs = ...   -- operator, infix definition form
--- Returns the bare operator name without parentheses so the merge in
--- mergePatterns matches signatures to definitions.
 patternNameFromSource :: Text -> Maybe Text
 patternNameFromSource src =
   let trimmed = T.dropWhile isHSpace src
@@ -222,11 +202,9 @@ patternNameFromSource src =
        Just rest ->
          let body = T.dropWhile isHSpace rest
          in case T.uncons body of
-              -- Parenthesized operator: pattern (:<<) ...
               Just ('(', afterOpen) ->
                 let opName = T.takeWhile (/= ')') afterOpen
                 in if T.null opName then Nothing else Just (T.strip opName)
-              -- Otherwise: alphabetic prefix OR infix-form definition
               _ ->
                 let firstTok = T.takeWhile (\c -> not (isHSpace c)
                                                  && c /= '\n'
@@ -236,7 +214,6 @@ patternNameFromSource src =
                     nextTok  = T.takeWhile (\c -> not (isHSpace c)
                                                  && c /= '\n') rest'
                 in if isOperatorish nextTok && not (T.null nextTok)
-                     -- pattern x :<< xs ... — middle token is the op
                      then Just nextTok
                      else if T.null firstTok
                        then Nothing
@@ -248,17 +225,11 @@ patternNameFromSource src =
       && T.all isOpChar t
       && t `notElem` reservedSyntax
     isOpChar c = c `elem` (":!#$%&*+./<=>?@\\^|-~" :: [Char])
-    -- Tokens made of operator characters that are reserved Haskell
-    -- syntax, not pattern names. Without this filter, 'pattern Empty
-    -- = []' would parse '=' as the operator and merge would break.
     reservedSyntax = ["=", "<-", "::", "->", "|", "@"]
 
--- | Merge pattern signatures (Map: name -> sig text + line) with
--- pattern definitions. If both exist, render combined; if only one
--- exists, render what we have.
 mergePatterns
-  :: [(Text, Int, Text)]  -- sigs
-  -> [(Text, Int, Text)]  -- binds
+  :: [(Text, Int, Text)]
+  -> [(Text, Int, Text)]
   -> [Pattern]
 mergePatterns sigs binds =
   let sigMap  = Map.fromList [ (n, (line, txt)) | (n, line, txt) <- sigs ]
@@ -292,8 +263,6 @@ extractFixity sourceLines ldecl =
          in [ Fixity verbatim (fixityOpsFromSource verbatim) (startLine sp) ]
        _ -> []
 
--- | Parse 'infixr 5 <>, :<>, :|>' style declarations. We strip the
--- direction keyword and precedence, then split the rest on commas.
 fixityOpsFromSource :: Text -> [Text]
 fixityOpsFromSource src =
   let trimmed = T.strip src
@@ -411,7 +380,6 @@ probedSettings = Settings.Settings
   , Settings.sToolSettings   = probedToolSettings
   , Settings.sPlatformMisc   = probedPlatformMisc
   , Settings.sRawSettings    = []
-  , Settings.sUnitSettings   = probedUnitSettings
   }
 
 probedGhcNameVersion :: Settings.GhcNameVersion
@@ -436,11 +404,6 @@ probedPlatformMisc = Settings.PlatformMisc
   , Settings.platformMisc_libFFI                             = False
   , Settings.platformMisc_llvmTarget                         = ""
   , Settings.platformMisc_targetRTSLinkerOnlySupportsSharedLibs = False
-  }
-
-probedUnitSettings :: Settings.UnitSettings
-probedUnitSettings = Settings.UnitSettings
-  { Settings.unitSettings_baseUnitId = stringToUnitId "base"
   }
 
 probedToolSettings :: Settings.ToolSettings
