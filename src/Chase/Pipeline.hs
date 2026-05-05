@@ -120,7 +120,8 @@ renderPreamble roots ok failed = do
     , "# begins with === BEGIN <path> === on its own line. Blocks contain"
     , "# the rendered .chase format: %file, %mod, %ext, %fixity, %uses,"
     , "# %const, %topology, data decls, %pattern, type signatures with"
-    , "# attached invariants and consumers, %decision blocks, and parse"
+    , "# attached invariants and consumers, %decision blocks, %open_issue"
+    , "# blocks (known problems with blocking/affects targets), and parse"
     , "# errors. Function bodies are deliberately omitted; the lines"
     , "# beginning with ! after a signature are the behavioral facts you"
     , "# would otherwise have to infer from reading the source."
@@ -156,15 +157,17 @@ attachAnnotations annMap cf =
       { chaseConstants  = annConstants
       , chaseInvariants = annInvariants
       , chaseDecisions  = annDecisions
+      , chaseOpenIssues = annOpenIssues
       , chaseTopologies = annTopologies
       }
 
--- | Drift check: invariants and decision-affects names must point at
--- something the parser actually found. Valid targets are signatures
--- AND pattern synonyms (both can carry behavioral annotations).
--- Class/instance heads, data decls, and constants are NOT valid drift
--- targets here because invariants attach to functions and patterns
--- only.
+-- | Drift check: invariant function names, decision-affects names,
+-- and open-issue affects names must point at something the parser
+-- actually found. Valid targets are signatures AND pattern synonyms
+-- (both can carry behavioral annotations). Open-issue 'blocking'
+-- entries are NOT drift-checked; they are free-text downstream
+-- pointers and can name services, features, or executables that
+-- aren't functions in this file.
 checkAnnotationDrift :: ChaseFile -> [Text]
 checkAnnotationDrift ChaseFile{..} =
   let validNames  = map sigName chaseSignatures
@@ -181,7 +184,14 @@ checkAnnotationDrift ChaseFile{..} =
         , n <- decAffects d
         , n `notElem` validNames
         ]
-  in invMissing <> decMissing
+      issueMissing =
+        [ "open_issue " <> oiName i
+            <> " references unknown function: " <> n
+        | i <- chaseOpenIssues
+        , n <- oiAffects i
+        , n `notElem` validNames
+        ]
+  in invMissing <> decMissing <> issueMissing
 
 mkOutputPath :: FilePath -> [FilePath] -> FilePath -> FilePath
 mkOutputPath outDir roots src =

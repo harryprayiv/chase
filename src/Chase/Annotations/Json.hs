@@ -13,6 +13,12 @@
 -- >           "why": "..." | ["...","..."],
 -- >           "affects": ["fn1", "fn2"] }
 -- >       ],
+-- >       "openIssues": [
+-- >         { "name": "...", "what": "...",
+-- >           "why": "..." | ["...","..."],
+-- >           "blocking": ["downstream feature", "..."],
+-- >           "affects": ["fn1", "fn2"] }
+-- >       ],
 -- >       "invariants": {
 -- >         "hashPassword": ["line one", "line two"],
 -- >         "createSession": {
@@ -71,7 +77,7 @@ loadAnnotations path = do
 
 -- | If the file exists and parses, return its contents.
 -- If missing, return empty silently. Parse errors are also silenced
--- here — use 'loadAnnotations' if you want to surface them.
+-- here -- use 'loadAnnotations' if you want to surface them.
 loadAnnotationsIfExists :: FilePath -> IO (Map Text ModuleAnnotations)
 loadAnnotationsIfExists path = do
   exists <- doesFileExist path
@@ -103,16 +109,19 @@ parseModule modName =
     consts  <- o A..:? "constants"  A..!= []
     invsObj <- o A..:? "invariants" A..!= KM.empty
     decs    <- o A..:? "decisions"  A..!= []
+    issues  <- o A..:? "openIssues" A..!= []
     tops    <- o A..:? "topologies" A..!= []
     pConsts <- mapM parseConstant consts
     pInvs   <- parseInvariantsMap invsObj
     pDecs   <- mapM parseDecision decs
+    pIssues <- mapM parseOpenIssue issues
     pTops   <- mapM parseTopology tops
     pure ModuleAnnotations
       { annModName    = modName
       , annConstants  = pConsts
       , annInvariants = pInvs
       , annDecisions  = pDecs
+      , annOpenIssues = pIssues
       , annTopologies = pTops
       }
 
@@ -190,11 +199,32 @@ parseDecision = A.withObject "decision" $ \o -> do
   what    <- o A..:  "what"
   whyVal  <- o A..:? "why" A..!= A.String ""
   affects <- o A..:? "affects" A..!= []
-  why <- case whyVal of
-    A.String s    -> pure s
-    a@(A.Array _) -> T.intercalate " " <$> AT.parseJSON a
-    _ -> fail "decision.why must be a string or array of strings"
+  why <- parseWhy "decision.why" whyVal
   pure $ Decision name what why affects
+
+-- open issues ----------------------------------------------------------
+
+-- | Same shape as a decision but with an additional 'blocking' list.
+-- 'why' accepts the same string-or-array form that decisions do.
+parseOpenIssue :: A.Value -> AT.Parser OpenIssue
+parseOpenIssue = A.withObject "openIssue" $ \o -> do
+  name     <- o A..:  "name"
+  what     <- o A..:  "what"
+  whyVal   <- o A..:? "why"      A..!= A.String ""
+  blocking <- o A..:? "blocking" A..!= []
+  affects  <- o A..:? "affects"  A..!= []
+  why <- parseWhy "openIssue.why" whyVal
+  pure $ OpenIssue name what why blocking affects
+
+-- | Shared by 'parseDecision' and 'parseOpenIssue': accept either a
+-- bare string or an array of strings, joining the array with single
+-- spaces. Authors should embed their own punctuation in array entries
+-- if they want sentence breaks.
+parseWhy :: String -> A.Value -> AT.Parser Text
+parseWhy ctx = \case
+  A.String s    -> pure s
+  a@(A.Array _) -> T.intercalate " " <$> AT.parseJSON a
+  _ -> fail $ ctx <> " must be a string or array of strings"
 
 -- topologies -----------------------------------------------------------
 

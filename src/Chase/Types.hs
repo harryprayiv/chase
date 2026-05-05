@@ -20,6 +20,8 @@ module Chase.Types
   , constBug
   , Decision (..)
   , decision
+  , OpenIssue (..)
+  , openIssue
   , Topology (..)
   ) where
 
@@ -28,8 +30,9 @@ import GHC.Generics (Generic)
 
 -- | The canonical structural description of one Haskell source file as
 -- chase sees it. Structural fields are populated by Chase.Parse;
--- annotation fields (constants, invariants, decisions, topologies) are
--- merged in later by Chase.Pipeline.attachAnnotations.
+-- annotation fields (constants, invariants, decisions, openIssues,
+-- topologies) are merged in later by
+-- Chase.Pipeline.attachAnnotations.
 data ChaseFile = ChaseFile
   { chaseSourcePath  :: FilePath
   , chaseModuleName  :: Text
@@ -42,6 +45,7 @@ data ChaseFile = ChaseFile
   , chaseConstants   :: [Constant]
   , chaseInvariants  :: [Invariant]
   , chaseDecisions   :: [Decision]
+  , chaseOpenIssues  :: [OpenIssue]
   , chaseTopologies  :: [Topology]
   , chaseParseErrors :: [Text]
   }
@@ -60,6 +64,7 @@ emptyChaseFile path = ChaseFile
   , chaseConstants   = []
   , chaseInvariants  = []
   , chaseDecisions   = []
+  , chaseOpenIssues  = []
   , chaseTopologies  = []
   , chaseParseErrors = []
   }
@@ -103,12 +108,13 @@ data ModuleAnnotations = ModuleAnnotations
   , annConstants  :: [Constant]
   , annInvariants :: [Invariant]
   , annDecisions  :: [Decision]
+  , annOpenIssues :: [OpenIssue]
   , annTopologies :: [Topology]
   }
   deriving stock (Show, Generic)
 
 emptyAnnotations :: Text -> ModuleAnnotations
-emptyAnnotations m = ModuleAnnotations m [] [] [] []
+emptyAnnotations m = ModuleAnnotations m [] [] [] [] []
 
 data Constant = Constant
   { constName     :: Text
@@ -150,6 +156,28 @@ data Decision = Decision
 
 decision :: Text -> Text -> Text -> [Text] -> Decision
 decision = Decision
+
+-- | A known problem in the module: something that does not yet work
+-- right, or works but with a caveat the reader needs to know about.
+-- Distinct from 'Decision' (settled tradeoff) by the addition of
+-- 'oiBlocking', a free-text list of what the issue is blocking
+-- downstream (services, features, executables, callers).
+--
+-- 'oiAffects' is drift-checked against same-file signatures and
+-- patterns, the same way 'decAffects' is. 'oiBlocking' is NOT
+-- drift-checked because it commonly names downstream concepts that
+-- aren't functions in this file.
+data OpenIssue = OpenIssue
+  { oiName     :: Text
+  , oiWhat     :: Text
+  , oiWhy      :: Text
+  , oiBlocking :: [Text]
+  , oiAffects  :: [Text]
+  }
+  deriving stock (Show, Generic)
+
+openIssue :: Text -> Text -> Text -> [Text] -> [Text] -> OpenIssue
+openIssue = OpenIssue
 
 data Topology = Topology
   { topName        :: Text

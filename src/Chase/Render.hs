@@ -19,6 +19,7 @@ renderChaseFile ChaseFile{..} = T.unlines $
   <> renderPatternsWithInvariants chasePatterns chaseInvariants
   <> renderSignaturesWithInvariants chaseSignatures chaseInvariants
   <> renderDecisions  chaseDecisions
+  <> renderOpenIssues chaseOpenIssues
   <> renderParseErrors chaseParseErrors
   where
     header =
@@ -33,7 +34,7 @@ renderExtensions xs = ["%ext " <> T.intercalate ", " xs, ""]
 
 -- | Fixity block. One line per fixity declaration, verbatim, indented
 -- under a %fixity heading. Placed right after %ext because it is
--- meta-context — it tells the reader how operator-using code parses.
+-- meta-context -- it tells the reader how operator-using code parses.
 renderFixities :: [Fixity] -> [Text]
 renderFixities [] = []
 renderFixities fs = "%fixity" : map (("  " <>) . fixVerbatim) fs <> [""]
@@ -134,6 +135,27 @@ renderDecisions ds = concatMap one ds
       , "  affects: " <> T.intercalate ", " decAffects
       , ""
       ]
+
+-- | Open issues render right after %decision blocks. The colon
+-- alignment uses "blocking:" as the longest field name so values line
+-- up at the same column. Empty 'blocking' or 'affects' lists drop
+-- their lines entirely; 'what' and 'why' always render.
+renderOpenIssues :: [OpenIssue] -> [Text]
+renderOpenIssues [] = []
+renderOpenIssues is = concatMap one is
+  where
+    one OpenIssue{..} =
+      [ "%open_issue " <> oiName
+      , "  what:     " <> oiWhat
+      , "  why:      " <> oiWhy
+      ]
+      <> [ "  blocking: " <> T.intercalate ", " oiBlocking
+         | not (null oiBlocking)
+         ]
+      <> [ "  affects:  " <> T.intercalate ", " oiAffects
+         | not (null oiAffects)
+         ]
+      <> [""]
 
 renderParseErrors :: [Text] -> [Text]
 renderParseErrors [] = []
