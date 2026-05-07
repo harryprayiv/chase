@@ -1,3 +1,7 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments    #-}
+
 module Chase.Pipeline
   ( ChaseConfig (..)
   , defaultConfig
@@ -51,7 +55,7 @@ runChase cfg@ChaseConfig{..} = case cfgBundleFile of
 runPerFile :: ChaseConfig -> IO ()
 runPerFile ChaseConfig{..} = do
   createDirectoryIfMissing True cfgOutputDir
-  files <- concat <$> mapM findHaskellFiles cfgSourceRoots
+  files <- concat <$> mapM findSourceFiles cfgSourceRoots
   forM_ files \src -> do
     when cfgVerbose $ putStrLn $ "parse  " <> src
     result <- parseSourceFile src
@@ -73,7 +77,7 @@ runPerFile ChaseConfig{..} = do
 runBundled :: ChaseConfig -> FilePath -> IO ()
 runBundled ChaseConfig{..} bundlePath = do
   createDirectoryIfMissing True (takeDirectory bundlePath)
-  files <- concat <$> mapM findHaskellFiles cfgSourceRoots
+  files <- concat <$> mapM findSourceFiles cfgSourceRoots
   failuresRef  <- newIORef (0 :: Int)
   successesRef <- newIORef (0 :: Int)
   blocks       <- forM files \src -> do
@@ -116,10 +120,11 @@ renderPreamble roots ok failed = do
                 <> T.pack (show failed) <> " failed"
     , ""
     , "# This file is a chase bundle: structural skeletons of multiple"
-    , "# Haskell source files concatenated into one document. Each block"
-    , "# begins with === BEGIN <path> === on its own line. Blocks contain"
-    , "# the rendered .chase format: %file, %mod, %ext, %fixity, %uses,"
-    , "# %const, %topology, data decls, %pattern, type signatures with"
+    , "# Haskell and PureScript source files concatenated into one document."
+    , "# Each block begins with === BEGIN <path> === on its own line."
+    , "# Blocks contain the rendered .chase format: %file, %mod, %lang,"
+    , "# %ext (Haskell only), %fixity, %uses, %const, %topology, data decls,"
+    , "# %foreign (PureScript only), %pattern, type signatures with"
     , "# attached invariants and consumers, %decision blocks, %open_issue"
     , "# blocks (known problems with blocking/affects targets), and parse"
     , "# errors. Function bodies are deliberately omitted; the lines"
@@ -161,16 +166,10 @@ attachAnnotations annMap cf =
       , chaseTopologies = annTopologies
       }
 
--- | Drift check: invariant function names, decision-affects names,
--- and open-issue affects names must point at something the parser
--- actually found. Valid targets are signatures AND pattern synonyms
--- (both can carry behavioral annotations). Open-issue 'blocking'
--- entries are NOT drift-checked; they are free-text downstream
--- pointers and can name services, features, or executables that
--- aren't functions in this file.
 checkAnnotationDrift :: ChaseFile -> [Text]
 checkAnnotationDrift ChaseFile{..} =
   let validNames  = map sigName chaseSignatures
+                 <> map sigName chaseForeignImports
                  <> map patName chasePatterns
       invMissing  =
         [ "invariant references unknown function: " <> invFunction i
@@ -209,8 +208,11 @@ relativeToRoots roots src =
        (r:_) -> r
        []    -> src
 
-findHaskellFiles :: FilePath -> IO [FilePath]
-findHaskellFiles root = do
+-- | Recursively find .hs and .purs files. Other extensions (.lhs, .hsc,
+-- .js, .css, etc.) are ignored. Both source languages are gathered into
+-- one list so the bundle interleaves them in directory order.
+findSourceFiles :: FilePath -> IO [FilePath]
+findSourceFiles root = do
   exists <- doesDirectoryExist root
   if not exists
     then pure []
@@ -220,6 +222,6 @@ findHaskellFiles root = do
       results <- forM fullPaths \p -> do
         isDir <- doesDirectoryExist p
         if isDir
-          then findHaskellFiles p
-          else pure [ p | takeExtension p == ".hs" ]
+          then findSourceFiles p
+          else pure [ p | takeExtension p `elem` [".hs", ".purs"] ]
       pure (concat results)
