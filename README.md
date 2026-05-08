@@ -417,6 +417,10 @@ Honest open questions:
   dates) or to extract more from the AST automatically (standalone
   deriving declarations, class/instance method bodies for callers who
   actually want them).
-- type-level and class-level decisions are real and need a way to be referenced honestly. A separate affectsTypes / affectsClasses field, or relaxing the parser to also recognize types and class names, would let these decisions stay specific specific instead of falling back to [].
+- type-level and class-level decisions are real and need a way to be 
+  referenced honestly. A separate affectsTypes / affectsClasses field, 
+  or relaxing the parser to also recognize types and class names, 
+  would let these decisions stay specific specific instead of falling
+  back to [].
 
 Open to issues and PRs from anyone using this on their own code.
