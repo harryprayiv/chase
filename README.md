@@ -389,22 +389,28 @@ bundle. Failures are counted in the bundle preamble.
 
 The PureScript parser is a line-based heuristic scanner. There is no
 maintained PureScript parser library in Haskell-land that doesn't drag
-the entire purs compiler with it as a dependency, so an AST approach
-would couple chase to whichever version of the purs compiler is
-buildable on your system. The line-based approach exploits
-PureScript's strict indentation rule: top-level declarations always
-start in column 0. An "anchor" is a column-0 line that matches a
-declaration prefix (`data`, `newtype`, `type`, `class`, `instance`,
-`else instance`, `derive`, `foreign`, `infixl`/`infixr`/`infix`, or a
-lowercase identifier followed by `::`). A "block" is the run of lines
-from one anchor up to the line before the next anchor.
+the entire purs compiler in as a dependency, so an AST approach would
+couple chase to whichever version of the purs compiler is buildable on
+your system. The line-based approach exploits PureScript's strict
+indentation rule: top-level declarations always start in column 0. An
+"anchor" is a column-0 line that matches a declaration prefix (`data`,
+`newtype`, `type`, `class`, `instance`, `else instance`, `derive`,
+`foreign`, `infixl`/`infixr`/`infix`, or a lowercase identifier
+followed by `::`). A "block" is the run of lines from one anchor up to
+the line before the next anchor.
 
-Multi-line `{- -}` block comments are blanked out (replaced with empty
-strings) before line scanning runs, so commented-out declarations
-don't fragment real blocks. Line numbers are preserved across the
-blanking. Nested block comments are not supported: the first `-}`
-closes regardless of depth. This matches the most common PureScript
-practice and keeps the stripper a single-pass scan.
+Multi-line `{- -}` block comments are blanked out (replaced with
+spaces, including the markers themselves) before line scanning runs,
+so commented-out declarations don't fragment real blocks. Both line
+count and column positions are preserved across the blanking, which
+keeps any subsequent line or column references against the cleaned
+source consistent with the original file. Nested block comments are
+not supported: the first `-}` closes regardless of depth. This matches
+the most common PureScript practice and keeps the stripper a
+single-pass scan. One known edge case: a `{-` or `-}` marker split
+across a line boundary (line ending with `{`, next line starting with
+`-`) will not be detected. Idiomatic PureScript does not place these
+mid-marker breaks at line edges.
 
 The tradeoff of a line-based scanner is brittleness to anything that
 breaks the column-0 assumption: CPP-style preprocessing, unusual

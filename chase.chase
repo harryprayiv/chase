@@ -1,5 +1,5 @@
 %bundle chase v1
-%generated 2026-05-11T20:45:56Z
+%generated 2026-05-11T21:22:12Z
 %roots /home/bismuth/git/chase/src
 %files 8 ok, 0 failed
 
@@ -338,9 +338,10 @@ extractStructure :: FilePath -> Text -> ChaseFile
   ! DkValue blocks are scanned but produce no output; function bodies are dropped as in Haskell mode
 
 stripBlockComments :: [Text] -> [Text]
-  ! currently a NO-OP: the state machine never enters its inside-comment branch (see open_issue BlockCommentStripperIsNoOp)
-  ! intended behavior is to blank out characters inside {- -} while preserving line count so subsequent line-number references stay accurate
-  ! callers should not rely on this function for correctness today; block comments containing decl-shaped text remain a known failure mode
+  ! replaces characters inside {- -} (including the two-character markers themselves) with single spaces; both line count AND column positions are preserved so subsequent line/column references against the cleaned source remain accurate
+  ! state carries across lines: a comment opened on line N and closed on line N+5 will blank all intervening characters
+  ! nested block comments are NOT supported: the first -} closes regardless of depth (intentional simplification matching the documented contract)
+  ! edge case NOT handled: a {- or -} marker split across a line boundary (e.g. line ending with '{' and the next line starting with '-') will not be detected. Idiomatic PureScript does not place these mid-marker breaks at line edges.
 
 isAnchor :: Text -> Bool
   ! true iff the line is non-empty AND its first character is not whitespace AND the line does not start with '--', 'module ', or 'import '
@@ -363,7 +364,7 @@ sliceLines :: [Text] -> Int -> Int -> [Text]
 
 classifyAnchor :: [Text] -> Text -> DeclKind
   ! matches column-0 line prefix against known keywords to produce a DeclKind
-  ! 'else instance ...' is classified as DkInstance via the 'else ' prefix; the 'else ' check is permissive (see open_issue ElsePrefixIsTooPermissive)
+  ! 'else instance ...' is classified as DkInstance via an explicit 'else instance ' prefix check; a bare 'else ' line is NOT recognized as an instance anchor
   ! anchors that don't match any keyword fall through to hasTopLevelTypeColon: if a '::' appears before any ' = ' in the block, the kind is DkSignature, otherwise DkValue
   ! DkValue is the catch-all and is silently dropped during emission; bare 'lowerIdent = ...' value bindings produce no chase output
 
@@ -430,7 +431,7 @@ classHeadName :: Text -> Text
   ! returns the first whitespace-delimited token after the context (so 'class Eq a <= Ord a' yields 'Ord')
 
 instanceHeadName :: Text -> Text
-  ! strips 'instance ', 'else instance ', or 'else ' prefix in that order
+  ! strips 'instance ' or 'else instance ' prefix, in that order; classifyAnchor guarantees one of these will match before this function is called
   ! if a '::' is present (named instance form like 'instance fooBar :: Foo a'), the part BEFORE '::' is the name; otherwise the entire head (with any trailing ' where' stripped) is the name
   ! anonymous instances like 'instance Show Foo where ...' produce 'Show Foo' as the identifier, since instances do not have a single language-level name
 
@@ -481,17 +482,6 @@ importsFromSource :: [Text] -> [Text]
   what:    DkClass, DkInstance, and DkDerive blocks render only the first line of the source span, not the body
   why:     Class bodies are method signatures, already extracted separately by classMethodSigs. Rendering the body in toDataDecl would duplicate them. Instance bodies are method definitions; chase deliberately drops function bodies, so dropping instance bodies is consistent. Derive declarations are always one line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable. Same rule as Haskell mode (decision HeadOnlyForClassAndInstance in Chase.Parse.Haskell), kept in sync deliberately.
   affects: toDataDecl, headOnly
-
-%open_issue BlockCommentStripperIsNoOp
-  what:     stripBlockComments does not actually strip {- -} block comments; the inside-comment state is never toggled to True
-  why:      The current implementation has a step function whose False-branch never sets the state to True on encountering '{-', so the True-branch (which would blank characters with spaces) is unreachable. The placeholder comment in source acknowledges this. The function returns its input unchanged. Symptom: a PureScript file with a top-level block comment whose body contains a line starting with 'data ', 'class ', 'instance ', etc. will treat that line as a real anchor and produce a spurious block, fragmenting any real declarations that follow. Real-world PureScript almost never embeds declaration-shaped text inside multi-line block comments, so the bug has not surfaced on cheeblr or other tested codebases. Fix is mechanical: implement the state machine properly (detect '{-' and '-}' two-character sequences, toggle the inside flag, blank lines that are inside a comment while preserving line count). Until then, mixing decl-shaped text into block comments is the failure mode to watch for.
-  blocking: robust handling of PureScript files that comment out declaration blocks
-  affects:  stripBlockComments
-
-%open_issue ElsePrefixIsTooPermissive
-  what:     classifyAnchor treats any column-0 line starting with 'else ' as DkInstance, not just 'else instance'
-  why:      The classifier checks 'else ' as a prefix to handle 'else instance', but there is no further check that what follows is 'instance'. A column-0 line beginning with 'else ' and not followed by 'instance' is unlikely in practice (PureScript syntax does not place 'else' at column 0 outside of instance chains) but is not rejected here. This is harmless today because no idiomatic PureScript triggers it, but if it does fire it will misclassify a non-instance anchor as an instance, and toDataDecl will headOnly-render it. Tightening the check to 'else instance ' is a one-line change.
-  affects:  classifyAnchor
 
 
 === BEGIN Chase/Parse.hs ===

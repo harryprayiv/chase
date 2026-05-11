@@ -1,3 +1,4 @@
+-- src/Chase/Parse/PureScript.hs
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -73,29 +74,31 @@ stripBlockComments = go False
   where
     go _      []     = []
     go inside (l:ls) =
-      let (line', inside') = strip inside l
-      in line' : go inside' ls
+      let (cleaned, inside') = stripLine inside l
+      in cleaned : go inside' ls
 
-    strip :: Bool -> Text -> (Text, Bool)
-    strip inside line = T.foldl' step (T.empty, inside) line
-                          & \(acc, i) -> (acc, i)
+    -- Replace characters inside {- -} with spaces (including the two
+    -- markers themselves) so subsequent line and column references
+    -- against the cleaned source stay accurate. State carries across
+    -- lines via the Bool argument. Nested comments are NOT supported:
+    -- the first -} closes regardless of depth.
+    stripLine :: Bool -> Text -> (Text, Bool)
+    stripLine startInside = loop startInside T.empty
       where
-        step (acc, False) c
-          | c == '{' && T.length acc > 0 && T.last acc == '\NUL' = (acc, False)  -- unreachable, placeholder
-          | otherwise = (T.snoc acc c, False)
-        step (acc, True)  _ = (T.snoc acc ' ', True)
-    -- The fold above is only a structural placeholder; the real stripping
-    -- is done by the simpler character-by-character pass below. Kept as
-    -- documentation of intent. The actual implementation lives in stripLine.
+        loop True acc t = case T.breakOn "-}" t of
+          (before, rest)
+            | T.null rest -> (acc <> blanks before, True)
+            | otherwise   ->
+                loop False (acc <> blanks before <> "  ") (T.drop 2 rest)
+        loop False acc t = case T.breakOn "{-" t of
+          (before, rest)
+            | T.null rest -> (acc <> before, False)
+            | otherwise   ->
+                loop True (acc <> before <> "  ") (T.drop 2 rest)
 
-    -- Local pipeline operator
-    (&) :: a -> (a -> b) -> b
-    x & f = f x
-    infixl 1 &
+    blanks :: Text -> Text
+    blanks t = T.replicate (T.length t) " "
 
--- ---------------------------------------------------------------------------
--- Block scanner
--- ---------------------------------------------------------------------------
 
 data DeclKind
   = DkData
@@ -154,17 +157,17 @@ sliceLines ls s e = take (e - s + 1) (drop (s - 1) ls)
 -- (for distinguishing a multi-line type signature from a value binding).
 classifyAnchor :: [Text] -> Text -> DeclKind
 classifyAnchor blockLines firstLine
-  | "data "      `T.isPrefixOf` firstLine = DkData
-  | "newtype "   `T.isPrefixOf` firstLine = DkNewtype
-  | "type "      `T.isPrefixOf` firstLine = DkType
-  | "class "     `T.isPrefixOf` firstLine = DkClass
-  | "instance "  `T.isPrefixOf` firstLine = DkInstance
-  | "else "      `T.isPrefixOf` firstLine = DkInstance
-  | "derive "    `T.isPrefixOf` firstLine = DkDerive
-  | "foreign "   `T.isPrefixOf` firstLine = DkForeign
-  | "infix"      `T.isPrefixOf` firstLine = DkFixity
-  | hasTopLevelTypeColon blockLines       = DkSignature
-  | otherwise                             = DkValue
+  | "data "           `T.isPrefixOf` firstLine = DkData
+  | "newtype "        `T.isPrefixOf` firstLine = DkNewtype
+  | "type "           `T.isPrefixOf` firstLine = DkType
+  | "class "          `T.isPrefixOf` firstLine = DkClass
+  | "instance "       `T.isPrefixOf` firstLine = DkInstance
+  | "else instance "  `T.isPrefixOf` firstLine = DkInstance
+  | "derive "         `T.isPrefixOf` firstLine = DkDerive
+  | "foreign "        `T.isPrefixOf` firstLine = DkForeign
+  | "infix"           `T.isPrefixOf` firstLine = DkFixity
+  | hasTopLevelTypeColon blockLines            = DkSignature
+  | otherwise                                  = DkValue
 
 -- | Detect "::" before any "=" (signature, not value binding). The "::"
 -- inside record types is fine because record types only appear in the RHS
@@ -345,9 +348,7 @@ instanceHeadName line =
         Just r  -> T.stripStart r
         Nothing -> case T.stripPrefix "else instance " line of
           Just r  -> T.stripStart r
-          Nothing -> case T.stripPrefix "else " line of
-            Just r  -> T.stripStart r
-            Nothing -> line
+          Nothing -> line
       (beforeColon, afterColon) = T.breakOn "::" afterKw
   in if T.null afterColon
        then T.strip (stripWhereSuffix afterKw)
