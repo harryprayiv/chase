@@ -57,6 +57,34 @@
     "Chase.Parse": {
       "decisions": [
         {
+          "name": "ExtensionBasedDispatch",
+          "what": "parseSourceFile selects the language by file extension: .hs goes to Chase.Parse.Haskell, .purs goes to Chase.Parse.PureScript",
+          "why": [
+            "The two languages need fundamentally different parsing strategies (ghc-lib-parser AST vs line-based scanner), so there is no shared parser core to factor.",
+            "Dispatch by extension is the cheap universal signal; no need to peek at file contents or first-line sniff.",
+            "Unknown extensions are unreachable in practice because Chase.Pipeline.findSourceFiles filters input by extension before dispatch; the unsupported-extension branch is defensive only."
+          ],
+          "affects": ["parseSourceFile"]
+        }
+      ],
+      "invariants": {
+        "parseSourceFile": {
+          "intent": "Thin dispatcher: route a source file to the per-language parser based on its extension",
+          "effects": ["IO"],
+          "notes": [
+            "case-sensitive on extension via takeExtension (System.FilePath does not lowercase)",
+            ".hs -> Chase.Parse.Haskell.parseSourceFile",
+            ".purs -> Chase.Parse.PureScript.parseSourceFile",
+            "any other extension returns Left ParseFailure with 'unsupported source extension'; this is defensive, since findSourceFiles already filters",
+            "this module is the only place a caller should reach for parsing; Chase.Pipeline never imports the language-specific parsers directly"
+          ]
+        }
+      }
+    },
+
+    "Chase.Parse.Haskell": {
+      "decisions": [
+        {
           "name": "ParserIsGhcLibParser",
           "what": "Use ghc-lib-parser as the parser; no manual fixity or extension list",
           "why": [
@@ -110,8 +138,7 @@
             "GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required"
           ],
           "consumes": [
-            "Chase.Pipeline.runPerFile (skip-and-continue on failure)",
-            "Chase.Pipeline.runBundled (records failure in preamble counter, emits %parse_error block)"
+            "Chase.Parse.parseSourceFile (the dispatcher invokes this for .hs files)"
           ]
         },
         "extractStructure": [
@@ -178,6 +205,228 @@
           "stops at the first non-blank, non-comment, non-pragma line",
           "extracts comma-separated extension lists from {-# LANGUAGE Foo, Bar #-} blocks",
           "OPTIONS_GHC and other non-LANGUAGE pragmas are ignored"
+        ]
+      }
+    },
+
+    "Chase.Parse.PureScript": {
+      "decisions": [
+        {
+          "name": "LineBasedScannerNotAst",
+          "what": "PureScript is parsed by a column-0 anchor scanner over raw text, not by an AST library",
+          "why": [
+            "No PureScript parser is available as a Haskell library without dragging the purs compiler in as a dependency. The compiler's parser is not packaged as a standalone library and is tightly coupled to its name-resolution and type-checking pipeline.",
+            "PureScript's strict indentation rule (top-level declarations always start in column 0, continuations are indented) makes a line-based scanner viable. Block boundaries are anchor lines; an anchor is a column-0 line that doesn't begin with '--', 'module ', or 'import '.",
+            "The cost is brittleness: any source that violates the column-0 assumption (preprocessing, unusual formatters, literate-style sources) breaks the scanner. The benefit is no large dependency, no version coupling to the PureScript compiler, and fast parsing."
+          ],
+          "affects": ["isAnchor", "scanBlocks", "classifyAnchor"]
+        },
+        {
+          "name": "ForeignImportsAreSeparateFromSignatures",
+          "what": "foreign import declarations populate chaseForeignImports rather than chaseSignatures",
+          "why": [
+            "Foreign imports bridge to a runtime FFI module (.js, .purs.js) and have a distinct review surface: changing one usually means changing JavaScript or another host-language file. Keeping them visually separate in the chase output flags this to the LLM consumer.",
+            "Mechanically the data is shape-compatible with Signature (name plus verbatim text), so they share the Signature type, just a different field on ChaseFile.",
+            "Both top-level 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms produce one entry; the latter extracts the type name rather than a value name."
+          ],
+          "affects": ["toForeignSig", "foreignImportName", "extractStructure"]
+        },
+        {
+          "name": "ClassMethodsAndTopLevelSigsAreFlattened",
+          "what": "Class method signatures are extracted in a second pass and concatenated with top-level signatures into one flat list",
+          "why": [
+            "Top-level signatures come from blocks classified as DkSignature; class method signatures come from scanning DkClass block bodies for indented 'name :: ...' lines.",
+            "The two streams are disjoint in idiomatic PureScript because methods are indented inside the class body and would never be column-0 anchors themselves.",
+            "Flattening into one list matches the chase output contract: invariants attach to signatures by name regardless of whether the signature is a top-level binding or a class method."
+          ],
+          "affects": ["extractStructure", "toSignature", "classMethodSigs"]
+        },
+        {
+          "name": "HeadOnlyForClassInstanceDerive",
+          "what": "DkClass, DkInstance, and DkDerive blocks render only the first line of the source span, not the body",
+          "why": [
+            "Class bodies are method signatures, already extracted separately by classMethodSigs. Rendering the body in toDataDecl would duplicate them.",
+            "Instance bodies are method definitions; chase deliberately drops function bodies, so dropping instance bodies is consistent.",
+            "Derive declarations are always one line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable.",
+            "Same rule as Haskell mode (decision HeadOnlyForClassAndInstance in Chase.Parse.Haskell), kept in sync deliberately."
+          ],
+          "affects": ["toDataDecl", "headOnly"]
+        }
+      ],
+      "openIssues": [
+        {
+          "name": "BlockCommentStripperIsNoOp",
+          "what": "stripBlockComments does not actually strip {- -} block comments; the inside-comment state is never toggled to True",
+          "why": [
+            "The current implementation has a step function whose False-branch never sets the state to True on encountering '{-', so the True-branch (which would blank characters with spaces) is unreachable. The placeholder comment in source acknowledges this. The function returns its input unchanged.",
+            "Symptom: a PureScript file with a top-level block comment whose body contains a line starting with 'data ', 'class ', 'instance ', etc. will treat that line as a real anchor and produce a spurious block, fragmenting any real declarations that follow.",
+            "Real-world PureScript almost never embeds declaration-shaped text inside multi-line block comments, so the bug has not surfaced on cheeblr or other tested codebases.",
+            "Fix is mechanical: implement the state machine properly (detect '{-' and '-}' two-character sequences, toggle the inside flag, blank lines that are inside a comment while preserving line count). Until then, mixing decl-shaped text into block comments is the failure mode to watch for."
+          ],
+          "blocking": ["robust handling of PureScript files that comment out declaration blocks"],
+          "affects": ["stripBlockComments"]
+        },
+        {
+          "name": "ElsePrefixIsTooPermissive",
+          "what": "classifyAnchor treats any column-0 line starting with 'else ' as DkInstance, not just 'else instance'",
+          "why": [
+            "The classifier checks 'else ' as a prefix to handle 'else instance', but there is no further check that what follows is 'instance'. A column-0 line beginning with 'else ' and not followed by 'instance' is unlikely in practice (PureScript syntax does not place 'else' at column 0 outside of instance chains) but is not rejected here.",
+            "This is harmless today because no idiomatic PureScript triggers it, but if it does fire it will misclassify a non-instance anchor as an instance, and toDataDecl will headOnly-render it.",
+            "Tightening the check to 'else instance ' is a one-line change."
+          ],
+          "blocking": [],
+          "affects": ["classifyAnchor"]
+        }
+      ],
+      "invariants": {
+        "parseSourceFile": {
+          "intent": "Read a .purs file as text, run the heuristic structure extractor, return either a ChaseFile or a ParseFailure",
+          "effects": ["IO"],
+          "notes": [
+            "uses TIO.readFile; any IO exception is caught via SomeException and converted to a ParseFailure with the read error message prefixed by 'read failed: '",
+            "there is no syntactic parse step: extraction is line-based and tolerant. A 'parse failure' in PureScript mode almost always means an IO failure, not a syntax problem.",
+            "this is intentional: malformed PureScript should still produce a partial structural skeleton rather than blocking the bundle"
+          ],
+          "consumes": [
+            "Chase.Parse.parseSourceFile (the dispatcher invokes this for .purs files)"
+          ]
+        },
+        "extractStructure": [
+          "orchestrates the full pipeline: stripBlockComments, scanBlocks, then per-block dispatch to toSignature/toForeignSig/toDataDecl/toFixity/classMethodSigs",
+          "module name and imports come from the cleaned source via moduleNameFromSource and importsFromSource; both are line-scoped, not block-scoped",
+          "chaseSignatures concatenates top-level signatures (toSignature on DkSignature blocks) with class method signatures (classMethodSigs on DkClass blocks)",
+          "chaseForeignImports comes from DkForeign blocks via toForeignSig",
+          "chaseFixities comes from DkFixity blocks via toFixity",
+          "DkValue blocks are scanned but produce no output; function bodies are dropped as in Haskell mode"
+        ],
+        "stripBlockComments": [
+          "currently a NO-OP: the state machine never enters its inside-comment branch (see open_issue BlockCommentStripperIsNoOp)",
+          "intended behavior is to blank out characters inside {- -} while preserving line count so subsequent line-number references stay accurate",
+          "callers should not rely on this function for correctness today; block comments containing decl-shaped text remain a known failure mode"
+        ],
+        "isAnchor": [
+          "true iff the line is non-empty AND its first character is not whitespace AND the line does not start with '--', 'module ', or 'import '",
+          "deliberately permissive: any other column-0 non-comment, non-header line is treated as a potential declaration anchor",
+          "classification of WHAT kind of anchor a line is happens later in classifyAnchor"
+        ],
+        "scanBlocks": [
+          "walks line-numbered source, emits one Block per anchor line",
+          "block end = (next anchor line - 1), or total line count for the last anchor",
+          "blank lines and indented body lines between two anchors belong to the EARLIER block; this matters for class method extraction, where indented method sigs are inside the class block's range"
+        ],
+        "computeEnds": [
+          "pairs each anchor (line, text) with the end line of its block",
+          "the last anchor's end is the total line count of the file",
+          "all other anchors' ends are (next anchor line - 1)"
+        ],
+        "sliceLines": [
+          "1-indexed inclusive slice over a [Text]",
+          "tolerates out-of-bounds inputs gracefully because take/drop on lists are total"
+        ],
+        "classifyAnchor": [
+          "matches column-0 line prefix against known keywords to produce a DeclKind",
+          "'else instance ...' is classified as DkInstance via the 'else ' prefix; the 'else ' check is permissive (see open_issue ElsePrefixIsTooPermissive)",
+          "anchors that don't match any keyword fall through to hasTopLevelTypeColon: if a '::' appears before any ' = ' in the block, the kind is DkSignature, otherwise DkValue",
+          "DkValue is the catch-all and is silently dropped during emission; bare 'lowerIdent = ...' value bindings produce no chase output"
+        ],
+        "hasTopLevelTypeColon": [
+          "concatenates the block's lines with single-space separators, then checks whether '::' appears before any ' = '",
+          "the ' = ' check (note the leading and trailing spaces) is meant to avoid matching '=' inside record literals or type-level equality; it can be fooled by signatures that don't use whitespace around '=' on continuation lines",
+          "returns True when a type signature shape is detected, False otherwise"
+        ],
+        "toSignature": {
+          "notes": [
+            "produces a Signature only for DkSignature blocks",
+            "verbatim text is the full block, trailing blanks trimmed",
+            "name comes from signatureName, which takes the text before '::' on the first line",
+            "an empty name suppresses output (defensive: an oddly-shaped signature block does not pollute the signature list with an empty entry)"
+          ],
+          "consumes": [
+            "Chase.Render.renderSignaturesWithInvariants (PureScript signatures share the renderer with Haskell signatures)"
+          ]
+        },
+        "signatureName": [
+          "takes the substring before '::' on the FIRST line of the verbatim text, then strips whitespace",
+          "multi-line signatures (with the type spanning extra lines) still have their name extracted correctly from the first line"
+        ],
+        "trimTrailingBlanks": [
+          "removes trailing blank lines from a multi-line Text",
+          "preserves leading blanks and internal blanks; only the tail is affected",
+          "used to keep block verbatim output tight against the next chase output element"
+        ],
+        "classMethodSigs": [
+          "scans the body of a DkClass block (excluding the head line) for lines containing '::' where the substring before '::' is a single lowercase identifier",
+          "method line numbers preserve the source position via the bodyStartLn offset",
+          "verbatim is the stripped method line ONLY, not any indented continuation; multi-line method signatures inside class bodies will lose their continuation lines (a known limitation that has not bitten in practice on cheeblr)"
+        ],
+        "isLowerIdent": [
+          "true iff the first character is 'a'..'z' or '_'",
+          "does NOT check the rest of the identifier; intended as a cheap discriminator for class method extraction"
+        ],
+        "toForeignSig": [
+          "produces a Signature only for DkForeign blocks",
+          "the resulting Signature lives in chaseForeignImports, not chaseSignatures (see decision ForeignImportsAreSeparateFromSignatures)",
+          "an empty name suppresses output"
+        ],
+        "foreignImportName": [
+          "handles both 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms",
+          "for the data form, returns the type name (after stripping 'data '); for the value form, returns the value name",
+          "name extraction stops at the first space, ':', or newline"
+        ],
+        "toDataDecl": [
+          "DkData, DkNewtype, DkType -> fullBody (entire source span is structural and worth keeping)",
+          "DkClass, DkInstance, DkDerive -> headOnly (only the first line)",
+          "anything else -> [] (no data decl emitted)"
+        ],
+        "fullBody": [
+          "renders the entire block range as verbatim text with trailing blanks trimmed",
+          "name comes from declName based on the block's DeclKind"
+        ],
+        "headOnly": [
+          "renders only the first line of the block",
+          "name comes from declName based on the block's DeclKind"
+        ],
+        "declName": [
+          "dispatches on DeclKind to call the appropriate name-extraction helper",
+          "for DkData/DkNewtype/DkType: takes the word immediately after the keyword, stopping at space, '(', '<', or newline (so 'data Foo a b' yields 'Foo')",
+          "for DkClass/DkInstance/DkDerive: delegates to classHeadName/instanceHeadName/deriveHeadName"
+        ],
+        "classHeadName": [
+          "strips 'class ' prefix, then if there is a '<=' context arrow, takes what comes after the arrow",
+          "returns the first whitespace-delimited token after the context (so 'class Eq a <= Ord a' yields 'Ord')"
+        ],
+        "instanceHeadName": [
+          "strips 'instance ', 'else instance ', or 'else ' prefix in that order",
+          "if a '::' is present (named instance form like 'instance fooBar :: Foo a'), the part BEFORE '::' is the name; otherwise the entire head (with any trailing ' where' stripped) is the name",
+          "anonymous instances like 'instance Show Foo where ...' produce 'Show Foo' as the identifier, since instances do not have a single language-level name"
+        ],
+        "deriveHeadName": [
+          "strips 'derive ', then optionally 'newtype ', then optionally 'instance ' from the prefix in that order",
+          "if a '::' is present (named derive form), takes the part before '::'; otherwise takes the rest as the name",
+          "covers 'derive instance ...', 'derive newtype instance ...', and the named variants of both"
+        ],
+        "stripWhereSuffix": [
+          "drops everything from ' where' onward (note the leading space) to clean instance heads",
+          "if no ' where' is found, returns the input unchanged"
+        ],
+        "toFixity": [
+          "produces a Fixity entry for DkFixity blocks",
+          "verbatim is the FIRST line only; multi-line fixity declarations are not idiomatic in PureScript",
+          "operator names come from fixityOps"
+        ],
+        "fixityOps": [
+          "for 'infixr 6 type Foo as <>': finds 'as' in the word list and returns the token after it (so '<>')",
+          "for the simpler 'infixl 5 someFn as +': same path, returns '+'",
+          "fallback: if no 'as' token is found, returns the LAST whitespace-delimited token; this is best-effort and may need refinement if PureScript fixity syntax grows new forms"
+        ],
+        "moduleNameFromSource": [
+          "scans every line for one starting with 'module ' (after stripStart), takes the first match",
+          "name characters are A-Z, a-z, 0-9, '.', '_', or apostrophe; takeWhile stops at the first non-matching character (so 'module Foo.Bar where' yields 'Foo.Bar')",
+          "returns empty Text if no module header is found (rare; will produce an empty %mod line in output)"
+        ],
+        "importsFromSource": [
+          "any line whose stripStart starts with 'import ' becomes one entry",
+          "qualified imports keep their full form including 'as Alias' and explicit name lists; Chase.Render.collapseImport strips the name list before output"
         ]
       }
     },
@@ -257,11 +506,12 @@
         },
         {
           "name": "DriftCheckerScopeIsLocal",
-          "what": "checkAnnotationDrift validates invariant function names and decision affects names against the SAME file's signatures only",
+          "what": "checkAnnotationDrift validates invariant function names and decision/open-issue affects names against the SAME file's signatures, foreign imports, and patterns only",
           "why": [
             "Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler.",
             "consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too.",
-            "The result is that consumes entries can rot silently. Documented in the README as a known limitation."
+            "Open-issue blocking entries are also not drift-checked: they commonly name downstream services or features rather than functions in the same module.",
+            "The result is that consumes and blocking entries can rot silently. Documented in the README as a known limitation."
           ],
           "affects": ["checkAnnotationDrift"]
         }
@@ -308,11 +558,13 @@
           ]
         },
         "checkAnnotationDrift": {
-          "intent": "Find invariants and decision affects that reference functions not present in the file",
+          "intent": "Find invariants, decision affects, and open-issue affects that reference functions not present in the file",
           "notes": [
-            "checks invariant function names against same-file signatures",
-            "checks decision affects names against same-file signatures",
-            "does NOT check consumes entries (cross-module, free-text, deliberately out of scope)",
+            "validNames pool = chaseSignatures ++ chaseForeignImports ++ chasePatterns; foreign imports are in scope for drift checking so PureScript foreign import annotations don't false-positive",
+            "checks invariant function names against the validNames pool",
+            "checks decision affects names against the validNames pool",
+            "checks open-issue affects names against the validNames pool",
+            "does NOT check consumes entries or open-issue blocking entries (cross-module, free-text, deliberately out of scope)",
             "returns a list of warning messages; never throws"
           ],
           "consumes": [
@@ -320,16 +572,17 @@
           ]
         },
         "mkOutputPath": [
-          "drops the .hs extension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots"
+          "drops the source extension (.hs or .purs) via dropExtension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots"
         ],
         "relativeToRoots": [
           "uses the FIRST matching root; if a file lives under multiple roots, the order in cfgSourceRoots wins",
           "if no root matches (file is outside any source root), returns the absolute path unchanged"
         ],
-        "findHaskellFiles": [
+        "findSourceFiles": [
           "recursive directory walk, sorted entries (Data.List.sort)",
-          "filters by takeExtension == '.hs'; .lhs and .hsc are NOT included",
-          "non-existent root returns empty list (silent); does not warn"
+          "filters by takeExtension in ('.hs', '.purs'); .lhs and .hsc are NOT included",
+          "non-existent root returns empty list (silent); does not warn",
+          "the returned list mixes both languages in alphabetical order; Chase.Parse.parseSourceFile handles per-file dispatch"
         ]
       }
     },
@@ -396,7 +649,7 @@
           "the resulting Map Text ModuleAnnotations is keyed by the literal JSON string; lookup in Chase.Pipeline.attachAnnotations must match exactly or it no-ops silently"
         ],
         "parseModule": [
-          "all four annotation lists (constants, invariants, decisions, topologies) are OPTIONAL",
+          "all five annotation lists (constants, invariants, decisions, openIssues, topologies) are OPTIONAL",
           "an empty module entry produces a ModuleAnnotations with all-empty fields, which then attaches as a no-op in the pipeline"
         ],
         "parseConstant": [
@@ -434,6 +687,16 @@
           "name, what required; affects defaults to empty",
           "why accepts string OR array of strings",
           "array form is joined with a single space (NOT a separator like '; ' or '. ') so authors should include their own punctuation if they want sentence breaks"
+        ],
+        "parseOpenIssue": [
+          "name, what required; blocking and affects both default to empty",
+          "why accepts string OR array of strings, same semantics as parseDecision",
+          "shape mirrors parseDecision exactly except for the additional blocking field"
+        ],
+        "parseWhy": [
+          "string -> returned as-is",
+          "array -> joined with a single space",
+          "anything else -> parser error with the context name (e.g. 'decision.why must be a string or array of strings')"
         ],
         "parseTopology": [
           "name, vertices, transitions all required",

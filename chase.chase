@@ -1,5 +1,5 @@
 %bundle chase v1
-%generated 2026-05-11T20:12:38Z
+%generated 2026-05-11T20:45:56Z
 %roots /home/bismuth/git/chase/src
 %files 8 ok, 0 failed
 
@@ -65,7 +65,7 @@ parseModulesMap :: A.Object -> AT.Parser (Map Text ModuleAnnotations)
   ! the resulting Map Text ModuleAnnotations is keyed by the literal JSON string; lookup in Chase.Pipeline.attachAnnotations must match exactly or it no-ops silently
 
 parseModule :: Text -> A.Value -> AT.Parser ModuleAnnotations
-  ! all four annotation lists (constants, invariants, decisions, topologies) are OPTIONAL
+  ! all five annotation lists (constants, invariants, decisions, openIssues, topologies) are OPTIONAL
   ! an empty module entry produces a ModuleAnnotations with all-empty fields, which then attaches as a no-op in the pipeline
 
 parseConstant :: A.Value -> AT.Parser Constant
@@ -101,8 +101,14 @@ parseDecision :: A.Value -> AT.Parser Decision
   ! array form is joined with a single space (NOT a separator like '; ' or '. ') so authors should include their own punctuation if they want sentence breaks
 
 parseOpenIssue :: A.Value -> AT.Parser OpenIssue
+  ! name, what required; blocking and affects both default to empty
+  ! why accepts string OR array of strings, same semantics as parseDecision
+  ! shape mirrors parseDecision exactly except for the additional blocking field
 
 parseWhy :: String -> A.Value -> AT.Parser Text
+  ! string -> returned as-is
+  ! array -> joined with a single space
+  ! anything else -> parser error with the context name (e.g. 'decision.why must be a string or array of strings')
 
 parseTopology :: A.Value -> AT.Parser Topology
   ! name, vertices, transitions all required
@@ -162,25 +168,50 @@ parseTopology :: A.Value -> AT.Parser Topology
 %uses Chase.Types
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
+  ! intent: Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic
+  ! effects: IO
+  ! reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer
+  ! applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts
+  ! ParseFailure is data, not an exception; the caller decides whether to skip or abort
+  ! GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required
+  > consumed by: Chase.Parse.parseSourceFile (the dispatcher invokes this for .hs files)
 
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
+  ! intent: Read LANGUAGE pragmas from source via getOptions, apply each to DynFlags, return the updated flags
+  ! must run BEFORE initParserOpts; the parser snapshots ExtBits at construction time
+  ! getOptions takes (ParserOpts, [String] supportedExts, StringBuffer, FilePath) - the supported list comes from supportedLanguagesAndExtensions applied to platformArchOS genericPlatform
+  ! TemplateHaskell is special-cased to ALSO set TemplateHaskellQuotes; xopt_set does not walk impliedXFlags, and the `$` lexer rule is gated on TemplateHaskellQuotesBit (not TemplateHaskellBit)
+  ! OPTIONS_GHC and -W flags returned by getOptions are silently dropped by parseExtensionFlag
+  ! extension names that aren't in LangExt.Extension fall through silently
 
 parseExtensionFlag :: String -> Maybe LangExt.Extension
 
 extractStructure
   :: FilePath -> Text -> [Text] -> HsModule GhcPs -> ChaseFile
+  ! produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls
+  ! constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations
 
 renderParseError :: PState -> Text
 
 moduleNameOf :: HsModule GhcPs -> Text
+  ! returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)
 
 importsOf :: HsModule GhcPs -> [Text]
+  ! pretty-prints each import via GHC's Outputable; the renderer in Chase.Render then collapses whitespace and strips the explicit name list
 
 extractSignatures :: [Text] -> LHsDecl GhcPs -> [Signature]
+  ! extracts top-level TypeSig declarations AND class method signatures
+  ! ClassDecl bodies have their tcdSigs walked separately by extractClassSig; both top-level and class-method sigs end up in the same flat [Signature] list
+  ! class methods are emitted with UNQUALIFIED names, same shape as top-level signatures, so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name
+  > consumed by: Chase.Render.renderSignaturesWithInvariants (the renderer assumes one Signature per top-level OR class-method binding)
 
 extractClassSig :: [Text] -> LSig GhcPs -> [Signature]
+  ! called per LSig in a class body's tcdSigs list
+  ! delegates to sigToSignatures so any new sig variant only needs to be added in one place
 
 sigToSignatures :: [Text] -> SrcSpan -> Sig GhcPs -> [Signature]
+  ! handles both TypeSig (top-level and most class methods) and ClassOpSig (class methods with default signatures)
+  ! other Sig variants (specialise pragmas, fixity declarations, deprecation warnings) deliberately produce no Signature; only type signatures are tracked
 
 extractPatternSig :: [Text] -> LHsDecl GhcPs -> [(Text, Int, Text)]
 
@@ -198,16 +229,33 @@ extractFixity :: [Text] -> LHsDecl GhcPs -> [Fixity]
 fixityOpsFromSource :: Text -> [Text]
 
 extractDataDecl :: [Text] -> LHsDecl GhcPs -> [ChaseDataDecl]
+  ! covers DataDecl, SynDecl, ClassDecl, FamDecl, and the InstD ClsInstD case
+  ! DataDecl, SynDecl, FamDecl render their full source span verbatim (the body IS the signature - constructors, type equation, kind, family equations)
+  ! ClassDecl and InstDecl render only the HEAD line via sliceFirstLine; see decision HeadOnlyForClassAndInstance
+  ! InstDecl uses the pretty-printed instance head as the cdd identifier (e.g. 'A.FromJSON SpecEntry') because instances do not have a single language-level name
 
 rdrNameToText :: RdrName -> Text
+  ! extracts the OccName String from a parse-phase RdrName via rdrNameOcc, then T.pack
+  ! produces the unqualified identifier as written in source
 
 startLine :: SrcSpan -> Int
 
 sliceSourceSpan :: [Text] -> SrcSpan -> Text
+  ! 1-indexed line slicing using the SrcSpan from the parser
+  ! trusts the span; no bounds checking against the file length
+  ! if a span is malformed the result is a possibly-truncated string, never a crash, because take/drop on lists are total
+  ! spans without real loc info (UnhelpfulSpan) return empty string
 
 sliceFirstLine :: [Text] -> SrcSpan -> Text
+  ! returns ONLY the starting line of a source span, no body
+  ! used for ClassDecl and InstDecl heads where the body is undesirable
+  ! spans without real loc info return empty string
 
 pragmasFromSource :: Text -> [Text]
+  ! purely textual scan of the source preamble; does not touch the AST
+  ! stops at the first non-blank, non-comment, non-pragma line
+  ! extracts comma-separated extension lists from {-# LANGUAGE Foo, Bar #-} blocks
+  ! OPTIONS_GHC and other non-LANGUAGE pragmas are ignored
 
 probedSettings :: Settings.Settings
 
@@ -218,6 +266,26 @@ probedFileSettings :: Settings.FileSettings
 probedPlatformMisc :: Settings.PlatformMisc
 
 probedToolSettings :: Settings.ToolSettings
+
+%decision ParserIsGhcLibParser
+  what:    Use ghc-lib-parser as the parser; no manual fixity or extension list
+  why:     ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions. The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax. ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks. Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state.
+  affects: parseSourceFile
+
+%decision PragmasReadFromSourceTextNotAst
+  what:    LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST
+  why:     GHC parses pragmas before the module body, so they do not appear in hsmodDecls. Reading them off the source text directly is cheaper, more direct, and survives any AST shape change in future ghc-lib-parser versions. The scan stops at the first non-blank, non-comment, non-pragma line, so it never reads past the preamble.
+  affects: pragmasFromSource
+
+%decision HeadOnlyForClassAndInstance
+  what:    ClassDecl and InstDecl render only the head line, not the body
+  why:     Class bodies are method signatures, already extracted separately by extractSignatures. Rendering the body in extractDataDecl would duplicate them. Instance bodies are method definitions. chase deliberately drops function bodies everywhere else, so dropping instance method bodies is consistent. For deeply-indented class or instance declarations spanning many lines, this also reduces token count substantially.
+  affects: extractDataDecl, sliceFirstLine
+
+%decision ExtensionImplicationsAppliedExplicitly
+  what:    TemplateHaskell -> TemplateHaskellQuotes is applied by hand in applySourcePragmas
+  why:     ghc-lib-parser's xopt_set sets exactly the named extension bit. It does NOT walk impliedXFlags, the table that says 'enabling X also enables Y'. GHC's own driver expands implications before handing flags to the parser; in our parser-only call path, no driver runs, so implications would silently fail to apply. Symptom of NOT applying this implication: files using $(...) splices fail with 'parse error on input `$`' even when -XTemplateHaskell is in the source. The `$` lexer rule is gated on TemplateHaskellQuotesBit, not TemplateHaskellBit. Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface.
+  affects: applySourcePragmas
 
 
 === BEGIN Chase/Parse/PureScript.hs ===
@@ -254,60 +322,176 @@ data Block = Block
   deriving (Show)
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
+  ! intent: Read a .purs file as text, run the heuristic structure extractor, return either a ChaseFile or a ParseFailure
+  ! effects: IO
+  ! uses TIO.readFile; any IO exception is caught via SomeException and converted to a ParseFailure with the read error message prefixed by 'read failed: '
+  ! there is no syntactic parse step: extraction is line-based and tolerant. A 'parse failure' in PureScript mode almost always means an IO failure, not a syntax problem.
+  ! this is intentional: malformed PureScript should still produce a partial structural skeleton rather than blocking the bundle
+  > consumed by: Chase.Parse.parseSourceFile (the dispatcher invokes this for .purs files)
 
 extractStructure :: FilePath -> Text -> ChaseFile
+  ! orchestrates the full pipeline: stripBlockComments, scanBlocks, then per-block dispatch to toSignature/toForeignSig/toDataDecl/toFixity/classMethodSigs
+  ! module name and imports come from the cleaned source via moduleNameFromSource and importsFromSource; both are line-scoped, not block-scoped
+  ! chaseSignatures concatenates top-level signatures (toSignature on DkSignature blocks) with class method signatures (classMethodSigs on DkClass blocks)
+  ! chaseForeignImports comes from DkForeign blocks via toForeignSig
+  ! chaseFixities comes from DkFixity blocks via toFixity
+  ! DkValue blocks are scanned but produce no output; function bodies are dropped as in Haskell mode
 
 stripBlockComments :: [Text] -> [Text]
+  ! currently a NO-OP: the state machine never enters its inside-comment branch (see open_issue BlockCommentStripperIsNoOp)
+  ! intended behavior is to blank out characters inside {- -} while preserving line count so subsequent line-number references stay accurate
+  ! callers should not rely on this function for correctness today; block comments containing decl-shaped text remain a known failure mode
 
 isAnchor :: Text -> Bool
+  ! true iff the line is non-empty AND its first character is not whitespace AND the line does not start with '--', 'module ', or 'import '
+  ! deliberately permissive: any other column-0 non-comment, non-header line is treated as a potential declaration anchor
+  ! classification of WHAT kind of anchor a line is happens later in classifyAnchor
 
 scanBlocks :: [Text] -> [Block]
+  ! walks line-numbered source, emits one Block per anchor line
+  ! block end = (next anchor line - 1), or total line count for the last anchor
+  ! blank lines and indented body lines between two anchors belong to the EARLIER block; this matters for class method extraction, where indented method sigs are inside the class block's range
 
 computeEnds :: Int -> [(Int, Text)] -> [((Int, Text), Int)]
+  ! pairs each anchor (line, text) with the end line of its block
+  ! the last anchor's end is the total line count of the file
+  ! all other anchors' ends are (next anchor line - 1)
 
 sliceLines :: [Text] -> Int -> Int -> [Text]
+  ! 1-indexed inclusive slice over a [Text]
+  ! tolerates out-of-bounds inputs gracefully because take/drop on lists are total
 
 classifyAnchor :: [Text] -> Text -> DeclKind
+  ! matches column-0 line prefix against known keywords to produce a DeclKind
+  ! 'else instance ...' is classified as DkInstance via the 'else ' prefix; the 'else ' check is permissive (see open_issue ElsePrefixIsTooPermissive)
+  ! anchors that don't match any keyword fall through to hasTopLevelTypeColon: if a '::' appears before any ' = ' in the block, the kind is DkSignature, otherwise DkValue
+  ! DkValue is the catch-all and is silently dropped during emission; bare 'lowerIdent = ...' value bindings produce no chase output
 
 hasTopLevelTypeColon :: [Text] -> Bool
+  ! concatenates the block's lines with single-space separators, then checks whether '::' appears before any ' = '
+  ! the ' = ' check (note the leading and trailing spaces) is meant to avoid matching '=' inside record literals or type-level equality; it can be fooled by signatures that don't use whitespace around '=' on continuation lines
+  ! returns True when a type signature shape is detected, False otherwise
 
 toSignature :: [Text] -> Block -> [Signature]
+  ! produces a Signature only for DkSignature blocks
+  ! verbatim text is the full block, trailing blanks trimmed
+  ! name comes from signatureName, which takes the text before '::' on the first line
+  ! an empty name suppresses output (defensive: an oddly-shaped signature block does not pollute the signature list with an empty entry)
+  > consumed by: Chase.Render.renderSignaturesWithInvariants (PureScript signatures share the renderer with Haskell signatures)
 
 signatureName :: Text -> Text
+  ! takes the substring before '::' on the FIRST line of the verbatim text, then strips whitespace
+  ! multi-line signatures (with the type spanning extra lines) still have their name extracted correctly from the first line
 
 trimTrailingBlanks :: Text -> Text
+  ! removes trailing blank lines from a multi-line Text
+  ! preserves leading blanks and internal blanks; only the tail is affected
+  ! used to keep block verbatim output tight against the next chase output element
 
 classMethodSigs :: [Text] -> Block -> [Signature]
+  ! scans the body of a DkClass block (excluding the head line) for lines containing '::' where the substring before '::' is a single lowercase identifier
+  ! method line numbers preserve the source position via the bodyStartLn offset
+  ! verbatim is the stripped method line ONLY, not any indented continuation; multi-line method signatures inside class bodies will lose their continuation lines (a known limitation that has not bitten in practice on cheeblr)
 
 isLowerIdent :: Text -> Bool
+  ! true iff the first character is 'a'..'z' or '_'
+  ! does NOT check the rest of the identifier; intended as a cheap discriminator for class method extraction
 
 toForeignSig :: [Text] -> Block -> [Signature]
+  ! produces a Signature only for DkForeign blocks
+  ! the resulting Signature lives in chaseForeignImports, not chaseSignatures (see decision ForeignImportsAreSeparateFromSignatures)
+  ! an empty name suppresses output
 
 foreignImportName :: Text -> Text
+  ! handles both 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms
+  ! for the data form, returns the type name (after stripping 'data '); for the value form, returns the value name
+  ! name extraction stops at the first space, ':', or newline
 
 toDataDecl :: [Text] -> Block -> [ChaseDataDecl]
+  ! DkData, DkNewtype, DkType -> fullBody (entire source span is structural and worth keeping)
+  ! DkClass, DkInstance, DkDerive -> headOnly (only the first line)
+  ! anything else -> [] (no data decl emitted)
 
 fullBody :: [Text] -> Block -> ChaseDataDecl
+  ! renders the entire block range as verbatim text with trailing blanks trimmed
+  ! name comes from declName based on the block's DeclKind
 
 headOnly :: [Text] -> Block -> ChaseDataDecl
+  ! renders only the first line of the block
+  ! name comes from declName based on the block's DeclKind
 
 declName :: DeclKind -> Text -> Text
+  ! dispatches on DeclKind to call the appropriate name-extraction helper
+  ! for DkData/DkNewtype/DkType: takes the word immediately after the keyword, stopping at space, '(', '<', or newline (so 'data Foo a b' yields 'Foo')
+  ! for DkClass/DkInstance/DkDerive: delegates to classHeadName/instanceHeadName/deriveHeadName
 
 classHeadName :: Text -> Text
+  ! strips 'class ' prefix, then if there is a '<=' context arrow, takes what comes after the arrow
+  ! returns the first whitespace-delimited token after the context (so 'class Eq a <= Ord a' yields 'Ord')
 
 instanceHeadName :: Text -> Text
+  ! strips 'instance ', 'else instance ', or 'else ' prefix in that order
+  ! if a '::' is present (named instance form like 'instance fooBar :: Foo a'), the part BEFORE '::' is the name; otherwise the entire head (with any trailing ' where' stripped) is the name
+  ! anonymous instances like 'instance Show Foo where ...' produce 'Show Foo' as the identifier, since instances do not have a single language-level name
 
 deriveHeadName :: Text -> Text
+  ! strips 'derive ', then optionally 'newtype ', then optionally 'instance ' from the prefix in that order
+  ! if a '::' is present (named derive form), takes the part before '::'; otherwise takes the rest as the name
+  ! covers 'derive instance ...', 'derive newtype instance ...', and the named variants of both
 
 stripWhereSuffix :: Text -> Text
+  ! drops everything from ' where' onward (note the leading space) to clean instance heads
+  ! if no ' where' is found, returns the input unchanged
 
 toFixity :: [Text] -> Block -> [Fixity]
+  ! produces a Fixity entry for DkFixity blocks
+  ! verbatim is the FIRST line only; multi-line fixity declarations are not idiomatic in PureScript
+  ! operator names come from fixityOps
 
 fixityOps :: Text -> [Text]
+  ! for 'infixr 6 type Foo as <>': finds 'as' in the word list and returns the token after it (so '<>')
+  ! for the simpler 'infixl 5 someFn as +': same path, returns '+'
+  ! fallback: if no 'as' token is found, returns the LAST whitespace-delimited token; this is best-effort and may need refinement if PureScript fixity syntax grows new forms
 
 moduleNameFromSource :: [Text] -> Text
+  ! scans every line for one starting with 'module ' (after stripStart), takes the first match
+  ! name characters are A-Z, a-z, 0-9, '.', '_', or apostrophe; takeWhile stops at the first non-matching character (so 'module Foo.Bar where' yields 'Foo.Bar')
+  ! returns empty Text if no module header is found (rare; will produce an empty %mod line in output)
 
 importsFromSource :: [Text] -> [Text]
+  ! any line whose stripStart starts with 'import ' becomes one entry
+  ! qualified imports keep their full form including 'as Alias' and explicit name lists; Chase.Render.collapseImport strips the name list before output
+
+%decision LineBasedScannerNotAst
+  what:    PureScript is parsed by a column-0 anchor scanner over raw text, not by an AST library
+  why:     No PureScript parser is available as a Haskell library without dragging the purs compiler in as a dependency. The compiler's parser is not packaged as a standalone library and is tightly coupled to its name-resolution and type-checking pipeline. PureScript's strict indentation rule (top-level declarations always start in column 0, continuations are indented) makes a line-based scanner viable. Block boundaries are anchor lines; an anchor is a column-0 line that doesn't begin with '--', 'module ', or 'import '. The cost is brittleness: any source that violates the column-0 assumption (preprocessing, unusual formatters, literate-style sources) breaks the scanner. The benefit is no large dependency, no version coupling to the PureScript compiler, and fast parsing.
+  affects: isAnchor, scanBlocks, classifyAnchor
+
+%decision ForeignImportsAreSeparateFromSignatures
+  what:    foreign import declarations populate chaseForeignImports rather than chaseSignatures
+  why:     Foreign imports bridge to a runtime FFI module (.js, .purs.js) and have a distinct review surface: changing one usually means changing JavaScript or another host-language file. Keeping them visually separate in the chase output flags this to the LLM consumer. Mechanically the data is shape-compatible with Signature (name plus verbatim text), so they share the Signature type, just a different field on ChaseFile. Both top-level 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms produce one entry; the latter extracts the type name rather than a value name.
+  affects: toForeignSig, foreignImportName, extractStructure
+
+%decision ClassMethodsAndTopLevelSigsAreFlattened
+  what:    Class method signatures are extracted in a second pass and concatenated with top-level signatures into one flat list
+  why:     Top-level signatures come from blocks classified as DkSignature; class method signatures come from scanning DkClass block bodies for indented 'name :: ...' lines. The two streams are disjoint in idiomatic PureScript because methods are indented inside the class body and would never be column-0 anchors themselves. Flattening into one list matches the chase output contract: invariants attach to signatures by name regardless of whether the signature is a top-level binding or a class method.
+  affects: extractStructure, toSignature, classMethodSigs
+
+%decision HeadOnlyForClassInstanceDerive
+  what:    DkClass, DkInstance, and DkDerive blocks render only the first line of the source span, not the body
+  why:     Class bodies are method signatures, already extracted separately by classMethodSigs. Rendering the body in toDataDecl would duplicate them. Instance bodies are method definitions; chase deliberately drops function bodies, so dropping instance bodies is consistent. Derive declarations are always one line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable. Same rule as Haskell mode (decision HeadOnlyForClassAndInstance in Chase.Parse.Haskell), kept in sync deliberately.
+  affects: toDataDecl, headOnly
+
+%open_issue BlockCommentStripperIsNoOp
+  what:     stripBlockComments does not actually strip {- -} block comments; the inside-comment state is never toggled to True
+  why:      The current implementation has a step function whose False-branch never sets the state to True on encountering '{-', so the True-branch (which would blank characters with spaces) is unreachable. The placeholder comment in source acknowledges this. The function returns its input unchanged. Symptom: a PureScript file with a top-level block comment whose body contains a line starting with 'data ', 'class ', 'instance ', etc. will treat that line as a real anchor and produce a spurious block, fragmenting any real declarations that follow. Real-world PureScript almost never embeds declaration-shaped text inside multi-line block comments, so the bug has not surfaced on cheeblr or other tested codebases. Fix is mechanical: implement the state machine properly (detect '{-' and '-}' two-character sequences, toggle the inside flag, blank lines that are inside a comment while preserving line count). Until then, mixing decl-shaped text into block comments is the failure mode to watch for.
+  blocking: robust handling of PureScript files that comment out declaration blocks
+  affects:  stripBlockComments
+
+%open_issue ElsePrefixIsTooPermissive
+  what:     classifyAnchor treats any column-0 line starting with 'else ' as DkInstance, not just 'else instance'
+  why:      The classifier checks 'else ' as a prefix to handle 'else instance', but there is no further check that what follows is 'instance'. A column-0 line beginning with 'else ' and not followed by 'instance' is unlikely in practice (PureScript syntax does not place 'else' at column 0 outside of instance chains) but is not rejected here. This is harmless today because no idiomatic PureScript triggers it, but if it does fire it will misclassify a non-instance anchor as an instance, and toDataDecl will headOnly-render it. Tightening the check to 'else instance ' is a one-line change.
+  affects:  classifyAnchor
 
 
 === BEGIN Chase/Parse.hs ===
@@ -325,34 +509,18 @@ importsFromSource :: [Text] -> [Text]
 %uses qualified Chase.Parse.PureScript as PS
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
-  ! intent: Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic
+  ! intent: Thin dispatcher: route a source file to the per-language parser based on its extension
   ! effects: IO
-  ! reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer
-  ! applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts
-  ! ParseFailure is data, not an exception; the caller decides whether to skip or abort
-  ! GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required
-  > consumed by: Chase.Pipeline.runPerFile (skip-and-continue on failure)
-  > consumed by: Chase.Pipeline.runBundled (records failure in preamble counter, emits %parse_error block)
+  ! case-sensitive on extension via takeExtension (System.FilePath does not lowercase)
+  ! .hs -> Chase.Parse.Haskell.parseSourceFile
+  ! .purs -> Chase.Parse.PureScript.parseSourceFile
+  ! any other extension returns Left ParseFailure with 'unsupported source extension'; this is defensive, since findSourceFiles already filters
+  ! this module is the only place a caller should reach for parsing; Chase.Pipeline never imports the language-specific parsers directly
 
-%decision ParserIsGhcLibParser
-  what:    Use ghc-lib-parser as the parser; no manual fixity or extension list
-  why:     ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions. The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax. ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks. Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state.
+%decision ExtensionBasedDispatch
+  what:    parseSourceFile selects the language by file extension: .hs goes to Chase.Parse.Haskell, .purs goes to Chase.Parse.PureScript
+  why:     The two languages need fundamentally different parsing strategies (ghc-lib-parser AST vs line-based scanner), so there is no shared parser core to factor. Dispatch by extension is the cheap universal signal; no need to peek at file contents or first-line sniff. Unknown extensions are unreachable in practice because Chase.Pipeline.findSourceFiles filters input by extension before dispatch; the unsupported-extension branch is defensive only.
   affects: parseSourceFile
-
-%decision PragmasReadFromSourceTextNotAst
-  what:    LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST
-  why:     GHC parses pragmas before the module body, so they do not appear in hsmodDecls. Reading them off the source text directly is cheaper, more direct, and survives any AST shape change in future ghc-lib-parser versions. The scan stops at the first non-blank, non-comment, non-pragma line, so it never reads past the preamble.
-  affects: pragmasFromSource
-
-%decision HeadOnlyForClassAndInstance
-  what:    ClassDecl and InstDecl render only the head line, not the body
-  why:     Class bodies are method signatures, already extracted separately by extractSignatures. Rendering the body in extractDataDecl would duplicate them. Instance bodies are method definitions. chase deliberately drops function bodies everywhere else, so dropping instance method bodies is consistent. For deeply-indented class or instance declarations spanning many lines, this also reduces token count substantially.
-  affects: extractDataDecl, sliceFirstLine
-
-%decision ExtensionImplicationsAppliedExplicitly
-  what:    TemplateHaskell -> TemplateHaskellQuotes is applied by hand in applySourcePragmas
-  why:     ghc-lib-parser's xopt_set sets exactly the named extension bit. It does NOT walk impliedXFlags, the table that says 'enabling X also enables Y'. GHC's own driver expands implications before handing flags to the parser; in our parser-only call path, no driver runs, so implications would silently fail to apply. Symptom of NOT applying this implication: files using $(...) splices fail with 'parse error on input `$`' even when -XTemplateHaskell is in the source. The `$` lexer rule is gated on TemplateHaskellQuotesBit, not TemplateHaskellBit. Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface.
-  affects: applySourcePragmas
 
 
 === BEGIN Chase/Pipeline.hs ===
@@ -421,21 +589,27 @@ attachAnnotations
   > consumed by: Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (every parsed file passes through here)
 
 checkAnnotationDrift :: ChaseFile -> [Text]
-  ! intent: Find invariants and decision affects that reference functions not present in the file
-  ! checks invariant function names against same-file signatures
-  ! checks decision affects names against same-file signatures
-  ! does NOT check consumes entries (cross-module, free-text, deliberately out of scope)
+  ! intent: Find invariants, decision affects, and open-issue affects that reference functions not present in the file
+  ! validNames pool = chaseSignatures ++ chaseForeignImports ++ chasePatterns; foreign imports are in scope for drift checking so PureScript foreign import annotations don't false-positive
+  ! checks invariant function names against the validNames pool
+  ! checks decision affects names against the validNames pool
+  ! checks open-issue affects names against the validNames pool
+  ! does NOT check consumes entries or open-issue blocking entries (cross-module, free-text, deliberately out of scope)
   ! returns a list of warning messages; never throws
   > consumed by: Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (warnings printed to stdout per file)
 
 mkOutputPath :: FilePath -> [FilePath] -> FilePath -> FilePath
-  ! drops the .hs extension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots
+  ! drops the source extension (.hs or .purs) via dropExtension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots
 
 relativeToRoots :: [FilePath] -> FilePath -> FilePath
   ! uses the FIRST matching root; if a file lives under multiple roots, the order in cfgSourceRoots wins
   ! if no root matches (file is outside any source root), returns the absolute path unchanged
 
 findSourceFiles :: FilePath -> IO [FilePath]
+  ! recursive directory walk, sorted entries (Data.List.sort)
+  ! filters by takeExtension in ('.hs', '.purs'); .lhs and .hsc are NOT included
+  ! non-existent root returns empty list (silent); does not warn
+  ! the returned list mixes both languages in alphabetical order; Chase.Parse.parseSourceFile handles per-file dispatch
 
 %decision AttachReplacesNotMerges
   what:    attachAnnotations OVERWRITES chaseConstants/chaseInvariants/chaseDecisions/chaseTopologies from the matching ModuleAnnotations
@@ -443,8 +617,8 @@ findSourceFiles :: FilePath -> IO [FilePath]
   affects: attachAnnotations
 
 %decision DriftCheckerScopeIsLocal
-  what:    checkAnnotationDrift validates invariant function names and decision affects names against the SAME file's signatures only
-  why:     Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler. consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too. The result is that consumes entries can rot silently. Documented in the README as a known limitation.
+  what:    checkAnnotationDrift validates invariant function names and decision/open-issue affects names against the SAME file's signatures, foreign imports, and patterns only
+  why:     Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler. consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too. Open-issue blocking entries are also not drift-checked: they commonly name downstream services or features rather than functions in the same module. The result is that consumes and blocking entries can rot silently. Documented in the README as a known limitation.
   affects: checkAnnotationDrift
 
 
