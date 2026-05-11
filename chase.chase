@@ -1,5 +1,5 @@
 %bundle chase v1
-%generated 2026-05-07T15:11:32Z
+%generated 2026-05-11T20:12:38Z
 %roots /home/bismuth/git/chase/src
 %files 8 ok, 0 failed
 
@@ -44,34 +44,85 @@ instance A.FromJSON SpecEntry where
 
 loadAnnotations
   :: FilePath -> IO (Either String (Map Text ModuleAnnotations))
+  ! intent: Read and parse a JSON annotations file, returning a path-prefixed error message on failure
+  ! effects: IO
+  ! missing file returns Left, NOT empty
+  ! Aeson decode errors and parser errors are both surfaced as Left with the path prefixed (so error output is useful at the CLI)
+  > consumed by: app/Main.hs loadAnnotationsOrDie (calls exitFailure on Left)
 
 loadAnnotationsIfExists :: FilePath -> IO (Map Text ModuleAnnotations)
+  ! intent: Best-effort load; missing or malformed file becomes empty Map, not an error
+  ! effects: IO
+  ! use this in library contexts where 'no annotations' is a valid runtime state
+  ! swallows parse errors silently; if you want diagnostics, use loadAnnotations
 
 parseRoot :: A.Value -> AT.Parser (Map Text ModuleAnnotations)
+  ! version defaults to 1 if absent; any other version fails with 'unsupported annotations version: N'
+  ! modules object is required; absent or wrong-typed produces an Aeson parse error
 
 parseModulesMap :: A.Object -> AT.Parser (Map Text ModuleAnnotations)
+  ! iterates the JSON object's KeyMap; preserves keys EXACTLY as written via Key.toText (case-sensitive, no normalization)
+  ! the resulting Map Text ModuleAnnotations is keyed by the literal JSON string; lookup in Chase.Pipeline.attachAnnotations must match exactly or it no-ops silently
 
 parseModule :: Text -> A.Value -> AT.Parser ModuleAnnotations
+  ! all four annotation lists (constants, invariants, decisions, topologies) are OPTIONAL
+  ! an empty module entry produces a ModuleAnnotations with all-empty fields, which then attaches as a no-op in the pipeline
 
 parseConstant :: A.Value -> AT.Parser Constant
+  ! name and value are required; notes is optional
 
 noteFromText :: Text -> Note
+  ! the 'BUG: ' prefix MUST include the trailing space; 'BUG:foo' (no space) is treated as a plain Note, not a BugNote
+  ! this is intentional: it disambiguates accidental colons in note text
 
 parseInvariantsMap :: A.Object -> AT.Parser [Invariant]
+  ! iterates the JSON object's KeyMap; key order is whatever Aeson decoded order is (typically insertion order in modern aeson)
+  ! the renderer does not re-sort; invariants appear in JSON object order, attached to signatures in source order
 
 parseInvariantValue :: Text -> A.Value -> AT.Parser Invariant
+  ! Array: parsed as [Text], wrapped via the inv smart constructor (no consumes, no hint)
+  ! Object: passed to parseObjectInvariant which assembles a structured Invariant
+  ! anything else: parser error with the function name and the expected shapes
 
 parseObjectInvariant :: Text -> A.Object -> AT.Parser Invariant
+  ! ORDER of assembled invLines: intent line, effects line, notes (verbatim), spec entries (rendered)
+  ! consumes is NOT in invLines; it goes into invConsumes and renders separately with the > sigil
+  ! hint is NOT in invLines; it goes into invBodyHint and renders after both ! and > lines
+  ! all six fields are optional; an empty object produces an Invariant with empty lns and consumes
+  > consumed by: Chase.Render.renderSignaturesWithInvariants (the renderer is the only consumer that distinguishes the four output streams)
 
 renderSpec :: SpecEntry -> Text
+  ! renders one SpecEntry as 'spec: <input> => <expected>' on a single line
+  ! no escaping; spec strings are written into invLines verbatim
 
 parseDecision :: A.Value -> AT.Parser Decision
+  ! name, what required; affects defaults to empty
+  ! why accepts string OR array of strings
+  ! array form is joined with a single space (NOT a separator like '; ' or '. ') so authors should include their own punctuation if they want sentence breaks
 
 parseOpenIssue :: A.Value -> AT.Parser OpenIssue
 
 parseWhy :: String -> A.Value -> AT.Parser Text
 
 parseTopology :: A.Value -> AT.Parser Topology
+  ! name, vertices, transitions all required
+  ! transitions is a JSON object: keys are 'from' vertex names, values are arrays of 'to' vertex names
+  ! no validation that transition vertex names appear in the vertices list
+
+%decision SilentVsLoudFileMissing
+  what:    loadAnnotationsIfExists returns empty on missing/malformed files; loadAnnotations returns Left
+  why:     The CLI uses loadAnnotations so that an explicit --annotations path with a typo fails loudly (you asked for it, you should know it failed). Library callers wanting 'use annotations if present, else don't bother' get loadAnnotationsIfExists. Mixing the two semantics into one function with a Bool flag was the obvious alternative; two functions with self-documenting names won.
+  affects: loadAnnotations, loadAnnotationsIfExists
+
+%decision InvariantValueIsSumOfArrayOrObject
+  what:    JSON invariant values are EITHER a flat array of strings OR an object with structured fields
+  why:     The flat-array form keeps trivial annotations terse: ['line 1', 'line 2'] is enough when there are no specs, no consumes, no intent worth distinguishing. The object form is for invariants with structure: intent, effects, notes, spec, consumes, hint. A single uniform schema (always object) would force visual noise on the common case. A single uniform schema (always array) would force string-encoding tricks for the structured case. Other JSON types (number, bool, null) are explicit parse errors with the function name in the message.
+  affects: parseInvariantValue, parseObjectInvariant
+
+%decision VersionFieldIsForwardCompatibility
+  what:    Top-level 'version' field; only version 1 is currently accepted
+  why:     Version-on-write costs nothing and makes any future breaking change a one-line check rather than a guess-the-shape exercise. Default value when absent is 1 (treats unversioned files as version 1) so existing files don't need to be touched.
+  affects: parseRoot
 
 
 === BEGIN Chase/Parse/Haskell.hs ===
@@ -274,6 +325,34 @@ importsFromSource :: [Text] -> [Text]
 %uses qualified Chase.Parse.PureScript as PS
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
+  ! intent: Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic
+  ! effects: IO
+  ! reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer
+  ! applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts
+  ! ParseFailure is data, not an exception; the caller decides whether to skip or abort
+  ! GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required
+  > consumed by: Chase.Pipeline.runPerFile (skip-and-continue on failure)
+  > consumed by: Chase.Pipeline.runBundled (records failure in preamble counter, emits %parse_error block)
+
+%decision ParserIsGhcLibParser
+  what:    Use ghc-lib-parser as the parser; no manual fixity or extension list
+  why:     ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions. The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax. ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks. Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state.
+  affects: parseSourceFile
+
+%decision PragmasReadFromSourceTextNotAst
+  what:    LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST
+  why:     GHC parses pragmas before the module body, so they do not appear in hsmodDecls. Reading them off the source text directly is cheaper, more direct, and survives any AST shape change in future ghc-lib-parser versions. The scan stops at the first non-blank, non-comment, non-pragma line, so it never reads past the preamble.
+  affects: pragmasFromSource
+
+%decision HeadOnlyForClassAndInstance
+  what:    ClassDecl and InstDecl render only the head line, not the body
+  why:     Class bodies are method signatures, already extracted separately by extractSignatures. Rendering the body in extractDataDecl would duplicate them. Instance bodies are method definitions. chase deliberately drops function bodies everywhere else, so dropping instance method bodies is consistent. For deeply-indented class or instance declarations spanning many lines, this also reduces token count substantially.
+  affects: extractDataDecl, sliceFirstLine
+
+%decision ExtensionImplicationsAppliedExplicitly
+  what:    TemplateHaskell -> TemplateHaskellQuotes is applied by hand in applySourcePragmas
+  why:     ghc-lib-parser's xopt_set sets exactly the named extension bit. It does NOT walk impliedXFlags, the table that says 'enabling X also enables Y'. GHC's own driver expands implications before handing flags to the parser; in our parser-only call path, no driver runs, so implications would silently fail to apply. Symptom of NOT applying this implication: files using $(...) splices fail with 'parse error on input `$`' even when -XTemplateHaskell is in the source. The `$` lexer rule is gated on TemplateHaskellQuotesBit, not TemplateHaskellBit. Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface.
+  affects: applySourcePragmas
 
 
 === BEGIN Chase/Pipeline.hs ===
@@ -307,12 +386,26 @@ data ChaseConfig = ChaseConfig
   }
 
 defaultConfig :: ChaseConfig
+  ! all fields default to empty/Nothing/False
+  ! callers override via record syntax; no Reader monad, no env vars
 
 runChase :: ChaseConfig -> IO ()
+  ! dispatches on cfgBundleFile: Nothing means per-file mode, Just means bundle mode
+  ! the two modes share parsing and annotation attachment but differ in output handling and failure tracking
 
 runPerFile :: ChaseConfig -> IO ()
+  ! writes one .chase file per source file, mirroring the directory tree under cfgOutputDir
+  ! parse failures are printed but NOT counted; success and failure are visually mixed in stdout
+  ! drift warnings are printed inline as files are processed
+  > consumed by: the bare runner when cfgBundleFile is Nothing
 
 runBundled :: ChaseConfig -> FilePath -> IO ()
+  ! intent: Concatenate all module skeletons into one file with a counted preamble
+  ! effects: IO
+  ! successesRef and failuresRef are IORef counters used in the preamble
+  ! ORDER: parse all files first (collecting blocks and counts), THEN render the preamble, THEN write everything in one TIO.writeFile
+  ! this means the preamble counters are accurate at write time even though the preamble appears first in the file
+  > consumed by: the bare runner when cfgBundleFile is Just
 
 renderPreamble :: [FilePath] -> Int -> Int -> IO Text
 
@@ -322,14 +415,37 @@ renderFailureBlock :: [FilePath] -> FilePath -> Text -> Text
 
 attachAnnotations
   :: Map Text ModuleAnnotations -> ChaseFile -> ChaseFile
+  ! intent: Merge a ModuleAnnotations into a parsed ChaseFile by module name lookup
+  ! no-op if the module name is not in the annotation map
+  ! REPLACES the four annotation fields rather than merging (see decision AttachReplacesNotMerges)
+  > consumed by: Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (every parsed file passes through here)
 
 checkAnnotationDrift :: ChaseFile -> [Text]
+  ! intent: Find invariants and decision affects that reference functions not present in the file
+  ! checks invariant function names against same-file signatures
+  ! checks decision affects names against same-file signatures
+  ! does NOT check consumes entries (cross-module, free-text, deliberately out of scope)
+  ! returns a list of warning messages; never throws
+  > consumed by: Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (warnings printed to stdout per file)
 
 mkOutputPath :: FilePath -> [FilePath] -> FilePath -> FilePath
+  ! drops the .hs extension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots
 
 relativeToRoots :: [FilePath] -> FilePath -> FilePath
+  ! uses the FIRST matching root; if a file lives under multiple roots, the order in cfgSourceRoots wins
+  ! if no root matches (file is outside any source root), returns the absolute path unchanged
 
 findSourceFiles :: FilePath -> IO [FilePath]
+
+%decision AttachReplacesNotMerges
+  what:    attachAnnotations OVERWRITES chaseConstants/chaseInvariants/chaseDecisions/chaseTopologies from the matching ModuleAnnotations
+  why:     Today the parser never populates these four fields, so 'replace' and 'merge' are observationally identical. If a future parser pass extracts annotations from source comments (e.g. via Haddock-style markup), this becomes a real choice. Replace is the safer default: the JSON file is the source of truth and merging would silently combine two notions of 'invariant'. Anyone adding parser-side extraction must change this function deliberately, not have the merge happen by accident.
+  affects: attachAnnotations
+
+%decision DriftCheckerScopeIsLocal
+  what:    checkAnnotationDrift validates invariant function names and decision affects names against the SAME file's signatures only
+  why:     Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler. consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too. The result is that consumes entries can rot silently. Documented in the README as a known limitation.
+  affects: checkAnnotationDrift
 
 
 === BEGIN Chase/Render.hs ===
@@ -342,16 +458,25 @@ findSourceFiles :: FilePath -> IO [FilePath]
 %uses Chase.Types
 
 renderChaseFile :: ChaseFile -> Text
+  ! fixed top-down order: header, %ext, %uses, %const, %topology, data decls, signatures+invariants+consumes, %decision, parse errors
+  ! the order is a contract: it is what an LLM trained or prompted on the chase format will expect to see
+  ! swapping any two top-level sections is a breaking change to the format
 
 renderExtensions :: [Text] -> [Text]
 
 renderFixities :: [Fixity] -> [Text]
 
 renderImports :: [Text] -> [Text]
+  ! drops the leading 'import' keyword (every line starts with the module name)
+  ! filters out any import that collapses to empty (defensive)
 
 collapseImport :: Text -> Text
+  ! ORDER: words+unwords to flatten newlines, takeWhile (/= '(') to drop name list, strip the 'import ' prefix
+  ! qualified imports keep the 'qualified Foo as F' shape because everything before '(' is preserved
 
 renderConstants :: [Constant] -> [Text]
+  ! notes are joined with '; ' on the same line as the constant
+  ! BUG notes get a 'BUG: ' prefix; plain notes render verbatim
 
 renderTopologies :: [Topology] -> [Text]
 
@@ -360,12 +485,30 @@ renderDataDecls :: [ChaseDataDecl] -> [Text]
 renderPatternsWithInvariants :: [Pattern] -> [Invariant] -> [Text]
 
 renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
+  ! ORDER per signature: signature verbatim, then '!' lines (invariants), then '>' lines (consumed by), then optional hint, then blank line
+  ! if a signature has no matching invariant, only the signature and a blank line are emitted
+  ! the lookup is by exact sigName match; case-sensitive
+  > consumed by: any LLM consumer of chase output relies on this ordering to distinguish facts from consumer pointers
 
 renderDecisions :: [Decision] -> [Text]
+  ! each decision renders as four lines: %decision <name>, what:, why:, affects:
+  ! why and affects are forced onto a single line each (Decision.decWhy is already collapsed by the JSON parser; affects is comma-joined here)
 
 renderOpenIssues :: [OpenIssue] -> [Text]
 
 renderParseErrors :: [Text] -> [Text]
+  ! leads with a blank line so parse errors do not visually adjoin the last decision
+  ! rendered ONLY in per-file output; runBundled emits its own per-file %parse_error block instead
+
+%decision OneLineFactsForLLMScannability
+  what:    Every annotation renders as one line per fact, indented two spaces under the signature it describes
+  why:     The audience is an LLM working under a context budget. Multi-line wrapped paragraphs hide structure and waste tokens. Sigils (! invariant, > consumed-by) let the model retrieve facts by category without parsing prose. Indentation under the signature attaches each fact to its function unambiguously, even when many functions share a module.
+  affects: renderSignaturesWithInvariants, renderConstants, renderDecisions
+
+%decision ImportsCollapseAndDropNames
+  what:    Each import becomes one line; the explicit name list inside parens is dropped
+  why:     The LLM does not benefit from knowing you imported (sort, nub) specifically; it benefits from knowing you imported Data.List. Multi-line imports with long name lists are the single biggest source of wasted tokens in raw Haskell source.
+  affects: renderImports, collapseImport
 
 
 === BEGIN Chase/Types.hs ===
@@ -488,20 +631,41 @@ data Topology = Topology
   deriving stock (Show, Generic)
 
 emptyChaseFile :: SourceLanguage -> FilePath -> ChaseFile
+  ! all annotation fields default to empty; structural fields are filled in by Chase.Parse.extractStructure
+  ! chaseSourcePath is the only field set at construction; everything else is added later
 
 emptyAnnotations :: Text -> ModuleAnnotations
+  ! annModName is set; the four annotation lists default to empty
+  ! callers add fields by record update
 
 constNote :: Text -> Note
 
 constBug :: Text -> Note
 
 inv :: Text -> [Text] -> Invariant
+  ! smart constructor that defaults invConsumes to [] and invBodyHint to Nothing
+  ! this is the path used by the JSON parser when an invariant value is a flat array of strings
+  > consumed by: Chase.Annotations.Json.parseInvariantValue (array branch)
 
 invHinted :: Text -> [Text] -> Text -> Invariant
+  ! smart constructor that defaults invConsumes to [] but sets invBodyHint
+  ! no current code path constructs an Invariant with both consumes and a body hint via a smart constructor; record syntax is required for that combination
 
 decision :: Text -> Text -> Text -> [Text] -> Decision
+  ! positional smart constructor matching the Decision data constructor field order
+  ! no defaulting; all four fields are required
 
 openIssue :: Text -> Text -> Text -> [Text] -> [Text] -> OpenIssue
+
+%decision NoteAndBugNoteAreDistinctConstructors
+  what:    Note carries a plain string; BugNote signals 'this is a known wart'
+  why:     BUG annotations are visually distinct in rendered output (BUG: prefix). Severity could have been a separate field but a two-constructor sum is cheaper at the JSON parser, the renderer, and the eye. If a third category becomes useful (TODO, DEPRECATED), this is the place to grow.
+  affects: constNote, constBug
+
+%decision InvariantHasFourPartShape
+  what:    Invariant = function name + ! lines + > consumes + optional hint
+  why:     invLines and invConsumes are rendered with different sigils (! vs >) and carry different semantics: facts vs downstream pointers. Keeping them as separate list fields rather than merging into one tagged list keeps the JSON loader simple and the renderer's job mechanical. invBodyHint is the escape hatch for cases where the body genuinely matters and the annotator wants to point at it.
+  affects: inv, invHinted
 
 
 === BEGIN Chase.hs ===
