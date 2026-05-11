@@ -403,7 +403,7 @@ incoherent: decisions are settled tradeoffs you would defend, open
 issues are unresolved problems, and the `blocking` field on open issues
 captures something decisions don't have a slot for.
 
-Honest open questions:
+Honest open questions: 
 
 - Whether the `!` invariant format generalizes beyond the author's coding
   style and conventions.
