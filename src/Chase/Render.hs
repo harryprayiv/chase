@@ -1,3 +1,6 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
+
 module Chase.Render
   ( renderChaseFile
   ) where
@@ -16,8 +19,9 @@ renderChaseFile ChaseFile{..} = T.unlines $
   <> renderConstants  chaseConstants
   <> renderTopologies chaseTopologies
   <> renderDataDecls  chaseDataDecls
-  <> renderPatternsWithInvariants chasePatterns chaseInvariants
-  <> renderSignaturesWithInvariants chaseSignatures chaseInvariants
+  <> renderForeignImports chaseForeignImports chaseInvariants chaseTestCoverage
+  <> renderPatternsWithInvariants chasePatterns chaseInvariants chaseTestCoverage
+  <> renderSignaturesWithInvariants chaseSignatures chaseInvariants chaseTestCoverage
   <> renderDecisions  chaseDecisions
   <> renderOpenIssues chaseOpenIssues
   <> renderParseErrors chaseParseErrors
@@ -32,9 +36,6 @@ renderExtensions :: [Text] -> [Text]
 renderExtensions [] = []
 renderExtensions xs = ["%ext " <> T.intercalate ", " xs, ""]
 
--- | Fixity block. One line per fixity declaration, verbatim, indented
--- under a %fixity heading. Placed right after %ext because it is
--- meta-context -- it tells the reader how operator-using code parses.
 renderFixities :: [Fixity] -> [Text]
 renderFixities [] = []
 renderFixities fs = "%fixity" : map (("  " <>) . fixVerbatim) fs <> [""]
@@ -83,37 +84,29 @@ renderDataDecls ds = concatMap one ds
   where
     one ChaseDataDecl{..} = [cddVerbatim, ""]
 
--- | Pattern synonyms render verbatim (combined sig + def if both
--- exist) followed by any invariants attached to the pattern name.
--- Same lookup mechanism as signatures: invariants reference the
--- pattern by its bare name.
-renderPatternsWithInvariants :: [Pattern] -> [Invariant] -> [Text]
-renderPatternsWithInvariants [] _ = []
-renderPatternsWithInvariants pats invs =
-  concatMap (renderPat invMap) pats
+renderForeignImports
+  :: [Signature]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+renderForeignImports [] _ _ = []
+renderForeignImports sigs invs mcov =
+  "%foreign" : concatMap (renderSig invMap mcov) sigs
   where
     invMap = [(invFunction i, i) | i <- invs]
-    renderPat m Pattern{..} =
-      let attached = lookup patName m
-          extra = case attached of
-            Nothing -> []
-            Just Invariant{..} ->
-                 [ "  ! " <> l                | l <- invLines    ]
-              <> [ "  > consumed by: " <> c   | c <- invConsumes ]
-              <> case invBodyHint of
-                   Nothing -> []
-                   Just h  -> ["  " <> h]
-      in [patVerbatim] <> extra <> [""]
 
--- | "!" lines are invariants. ">" lines are downstream consumers.
--- Both indented under the type sig.
-renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
-renderSignaturesWithInvariants sigs invs =
-  concatMap (renderSig invMap) sigs
+renderPatternsWithInvariants
+  :: [Pattern]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+renderPatternsWithInvariants [] _ _ = []
+renderPatternsWithInvariants pats invs mcov =
+  concatMap renderPat pats
   where
     invMap = [(invFunction i, i) | i <- invs]
-    renderSig m Signature{..} =
-      let attached = lookup sigName m
+    renderPat Pattern{..} =
+      let attached = lookup patName invMap
           extra = case attached of
             Nothing -> []
             Just Invariant{..} ->
@@ -122,7 +115,48 @@ renderSignaturesWithInvariants sigs invs =
               <> case invBodyHint of
                    Nothing -> []
                    Just h  -> ["  " <> h]
-      in [sigVerbatim] <> extra <> [""]
+          covLine = renderCoverage patName mcov
+      in [patVerbatim] <> extra <> covLine <> [""]
+
+renderSignaturesWithInvariants
+  :: [Signature]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+renderSignaturesWithInvariants sigs invs mcov =
+  concatMap (renderSig invMap mcov) sigs
+  where
+    invMap = [(invFunction i, i) | i <- invs]
+
+renderSig
+  :: [(Text, Invariant)]
+  -> Maybe [(Text, [TestRef])]
+  -> Signature
+  -> [Text]
+renderSig invMap mcov Signature{..} =
+  let attached = lookup sigName invMap
+      extra = case attached of
+        Nothing -> []
+        Just Invariant{..} ->
+             [ "  ! " <> l                | l <- invLines    ]
+          <> [ "  > consumed by: " <> c   | c <- invConsumes ]
+          <> case invBodyHint of
+               Nothing -> []
+               Just h  -> ["  " <> h]
+      covLine = renderCoverage sigName mcov
+  in [sigVerbatim] <> extra <> covLine <> [""]
+
+renderCoverage :: Text -> Maybe [(Text, [TestRef])] -> [Text]
+renderCoverage _    Nothing       = []
+renderCoverage name (Just covMap) =
+  case lookup name covMap of
+    Nothing   -> []
+    Just []   -> ["  ? no test references"]
+    Just refs -> ["  ? tested by: "
+                  <> T.intercalate ", " (map renderTestRef refs)]
+
+renderTestRef :: TestRef -> Text
+renderTestRef tr = trModule tr <> "." <> trFunction tr
 
 renderDecisions :: [Decision] -> [Text]
 renderDecisions [] = []
@@ -136,10 +170,6 @@ renderDecisions ds = concatMap one ds
       , ""
       ]
 
--- | Open issues render right after %decision blocks. The colon
--- alignment uses "blocking:" as the longest field name so values line
--- up at the same column. Empty 'blocking' or 'affects' lists drop
--- their lines entirely; 'what' and 'why' always render.
 renderOpenIssues :: [OpenIssue] -> [Text]
 renderOpenIssues [] = []
 renderOpenIssues is = concatMap one is

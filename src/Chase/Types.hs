@@ -24,19 +24,15 @@ module Chase.Types
   , OpenIssue (..)
   , openIssue
   , Topology (..)
+  , TestRef (..)
   ) where
 
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
--- | Which language a parsed file is in. Used by the renderer to suppress
--- sections that are not meaningful for one language (e.g. %ext for PureScript)
--- and to allow the pipeline to dispatch to the correct parser.
 data SourceLanguage = LangHaskell | LangPureScript
   deriving stock (Show, Eq, Generic)
 
--- | Parser-level failure. Lifted to Chase.Types so that both the Haskell and
--- PureScript backends can produce it without depending on each other.
 data ParseFailure = ParseFailure
   { pfPath :: FilePath
   , pfMsg  :: Text
@@ -47,12 +43,12 @@ data ChaseFile = ChaseFile
   { chaseSourcePath     :: FilePath
   , chaseLanguage       :: SourceLanguage
   , chaseModuleName     :: Text
-  , chaseExtensions     :: [Text]          -- Haskell only; empty for PureScript
+  , chaseExtensions     :: [Text]
   , chaseFixities       :: [Fixity]
   , chaseImports        :: [Text]
   , chaseSignatures     :: [Signature]
-  , chaseForeignImports :: [Signature]     -- PureScript only; empty for Haskell
-  , chasePatterns       :: [Pattern]       -- Haskell only; empty for PureScript
+  , chaseForeignImports :: [Signature]
+  , chasePatterns       :: [Pattern]
   , chaseDataDecls      :: [ChaseDataDecl]
   , chaseConstants      :: [Constant]
   , chaseInvariants     :: [Invariant]
@@ -60,6 +56,7 @@ data ChaseFile = ChaseFile
   , chaseOpenIssues     :: [OpenIssue]
   , chaseTopologies     :: [Topology]
   , chaseParseErrors    :: [Text]
+  , chaseTestCoverage   :: Maybe [(Text, [TestRef])]
   }
   deriving stock (Show, Generic)
 
@@ -81,6 +78,7 @@ emptyChaseFile lang path = ChaseFile
   , chaseOpenIssues     = []
   , chaseTopologies     = []
   , chaseParseErrors    = []
+  , chaseTestCoverage   = Nothing
   }
 
 data Signature = Signature
@@ -181,5 +179,16 @@ data Topology = Topology
   { topName        :: Text
   , topVertices    :: [Text]
   , topTransitions :: [(Text, [Text])]
+  }
+  deriving stock (Show, Generic)
+
+-- | One reference to a target function from a test source file.
+-- trModule   : name of the test module (e.g. \"Test.Auth\")
+-- trFunction : top-level test binding that contains the reference
+-- trSrcLine  : 1-indexed line of the test binding head
+data TestRef = TestRef
+  { trModule   :: Text
+  , trFunction :: Text
+  , trSrcLine  :: Int
   }
   deriving stock (Show, Generic)

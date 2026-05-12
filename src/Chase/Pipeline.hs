@@ -26,15 +26,17 @@ import System.FilePath
   )
 import qualified Data.List
 
-import Chase.Types
-import Chase.Parse
-import Chase.Render
+import           Chase.Types
+import           Chase.Parse
+import           Chase.Render
+import qualified Chase.Coverage as Coverage
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
   , cfgOutputDir   :: FilePath
   , cfgBundleFile  :: Maybe FilePath
   , cfgAnnotations :: Map Text ModuleAnnotations
+  , cfgTestRoots   :: [FilePath]
   , cfgVerbose     :: Bool
   }
 
@@ -44,16 +46,48 @@ defaultConfig = ChaseConfig
   , cfgOutputDir   = "chase"
   , cfgBundleFile  = Nothing
   , cfgAnnotations = Map.empty
+  , cfgTestRoots   = []
   , cfgVerbose     = False
   }
 
 runChase :: ChaseConfig -> IO ()
-runChase cfg@ChaseConfig{..} = case cfgBundleFile of
-  Nothing      -> runPerFile cfg
-  Just bundle  -> runBundled cfg bundle
+runChase cfg = do
+  testIdx <- buildTestIndexOrEmpty cfg
+  case cfgBundleFile cfg of
+    Nothing     -> runPerFile  cfg testIdx
+    Just bundle -> runBundled  cfg bundle testIdx
 
-runPerFile :: ChaseConfig -> IO ()
-runPerFile ChaseConfig{..} = do
+-- | Parse every .hs file under cfgTestRoots and build the global
+-- reference index. If cfgTestRoots is empty, returns an empty map and
+-- the rest of the pipeline emits no ? lines.
+buildTestIndexOrEmpty :: ChaseConfig -> IO Coverage.TestRefIndex
+buildTestIndexOrEmpty ChaseConfig{..}
+  | null cfgTestRoots = pure Map.empty
+  | otherwise = do
+      when cfgVerbose $ do
+        putStrLn ""
+        putStrLn $ "test roots: "
+                <> Data.List.intercalate ", " cfgTestRoots
+      files <- concat <$> mapM findSourceFiles cfgTestRoots
+      let hsFiles = filter (\p -> takeExtension p == ".hs") files
+      bindings <- forM hsFiles \p -> do
+        when cfgVerbose $ putStrLn $ "scan   " <> p
+        result <- Coverage.parseTestFile p
+        case result of
+          Left ParseFailure{..} -> do
+            putStrLn $ "WARN: test parse failed for " <> pfPath
+            TIO.putStrLn $ "  " <> pfMsg
+            pure []
+          Right bs -> pure bs
+      let idx = Coverage.buildTestIndex (concat bindings)
+      when cfgVerbose $ do
+        putStrLn $ "index  " <> show (Map.size idx)
+                <> " distinct names referenced by tests"
+        putStrLn ""
+      pure idx
+
+runPerFile :: ChaseConfig -> Coverage.TestRefIndex -> IO ()
+runPerFile ChaseConfig{..} testIdx = do
   createDirectoryIfMissing True cfgOutputDir
   files <- concat <$> mapM findSourceFiles cfgSourceRoots
   forM_ files \src -> do
@@ -64,7 +98,7 @@ runPerFile ChaseConfig{..} = do
         putStrLn $ "WARN: parse failed for " <> pfPath
         TIO.putStrLn $ "  " <> pfMsg
       Right structural -> do
-        let merged   = attachAnnotations cfgAnnotations structural
+        let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
             outPath  = mkOutputPath cfgOutputDir cfgSourceRoots src
             rendered = renderChaseFile merged
             drift    = checkAnnotationDrift merged
@@ -74,8 +108,8 @@ runPerFile ChaseConfig{..} = do
         TIO.writeFile outPath rendered
         when cfgVerbose $ putStrLn $ "write  " <> outPath
 
-runBundled :: ChaseConfig -> FilePath -> IO ()
-runBundled ChaseConfig{..} bundlePath = do
+runBundled :: ChaseConfig -> FilePath -> Coverage.TestRefIndex -> IO ()
+runBundled ChaseConfig{..} bundlePath testIdx = do
   createDirectoryIfMissing True (takeDirectory bundlePath)
   files <- concat <$> mapM findSourceFiles cfgSourceRoots
   failuresRef  <- newIORef (0 :: Int)
@@ -91,7 +125,7 @@ runBundled ChaseConfig{..} bundlePath = do
         pure (renderFailureBlock cfgSourceRoots src pfMsg)
       Right structural -> do
         modifyIORef' successesRef (+ 1)
-        let merged   = attachAnnotations cfgAnnotations structural
+        let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
             rendered = renderChaseFile merged
             drift    = checkAnnotationDrift merged
         forM_ drift \w ->
@@ -107,6 +141,20 @@ runBundled ChaseConfig{..} bundlePath = do
     putStrLn $ "bundled " <> show successes
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
+
+-- | Compose attachAnnotations and attachCoverage; the latter only runs
+-- if cfgTestRoots is non-empty (the testIdx is meaningless otherwise).
+applyPasses
+  :: Map Text ModuleAnnotations
+  -> [FilePath]
+  -> Coverage.TestRefIndex
+  -> ChaseFile
+  -> ChaseFile
+applyPasses anns testRoots testIdx cf =
+  let withAnn = attachAnnotations anns cf
+  in if null testRoots
+       then withAnn
+       else Coverage.attachCoverage testIdx withAnn
 
 renderPreamble :: [FilePath] -> Int -> Int -> IO Text
 renderPreamble roots ok failed = do
@@ -125,7 +173,8 @@ renderPreamble roots ok failed = do
     , "# Blocks contain the rendered .chase format: %file, %mod, %lang,"
     , "# %ext (Haskell only), %fixity, %uses, %const, %topology, data decls,"
     , "# %foreign (PureScript only), %pattern, type signatures with"
-    , "# attached invariants and consumers, %decision blocks, %open_issue"
+    , "# attached invariants and consumers, ? tested-by lines (when test"
+    , "# coverage analysis was enabled), %decision blocks, %open_issue"
     , "# blocks (known problems with blocking/affects targets), and parse"
     , "# errors. Function bodies are deliberately omitted; the lines"
     , "# beginning with ! after a signature are the behavioral facts you"
@@ -208,9 +257,6 @@ relativeToRoots roots src =
        (r:_) -> r
        []    -> src
 
--- | Recursively find .hs and .purs files. Other extensions (.lhs, .hsc,
--- .js, .css, etc.) are ignored. Both source languages are gathered into
--- one list so the bundle interleaves them in directory order.
 findSourceFiles :: FilePath -> IO [FilePath]
 findSourceFiles root = do
   exists <- doesDirectoryExist root

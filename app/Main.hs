@@ -1,17 +1,20 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.List (isSuffixOf)
 import Data.Text (Text)
-import System.Directory (doesFileExist)
-import System.Environment (getArgs, getProgName)
+import Data.List (isSuffixOf)
+import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.Directory (doesFileExist, doesDirectoryExist)
 import System.IO (hPutStrLn, stderr)
 
-import Chase
+import Chase.Pipeline
+import Chase.Annotations.Json
+import Chase.Types
 
 defaultAnnotationsPath :: FilePath
 defaultAnnotationsPath = "chase-annotations.json"
@@ -19,34 +22,45 @@ defaultAnnotationsPath = "chase-annotations.json"
 main :: IO ()
 main = do
   args <- getArgs
-  prog <- getProgName
   case args of
-    [src, out]               -> runWith src out Nothing
-    [src, out, annPath]      -> runWith src out (Just annPath)
-    _                         -> usage prog
+    [src, out] ->
+      runWith src out Nothing Nothing
+    [src, out, ann] ->
+      runWith src out (Just ann) Nothing
+    [src, out, ann, test] ->
+      runWith src out (Just ann) (Just test)
+    _ -> usage
 
-runWith :: FilePath -> FilePath -> Maybe FilePath -> IO ()
-runWith src out mExplicit = do
-  annPath <- resolveAnnotationsPath mExplicit
-  anns    <- loadAnnotationsOrDie annPath
-  let bundleMode = ".chase" `isSuffixOf` out
-      cfg | bundleMode = defaultConfig
-              { cfgSourceRoots = [src]
-              , cfgBundleFile  = Just out
-              , cfgAnnotations = anns
-              , cfgVerbose     = True
-              }
-          | otherwise = defaultConfig
-              { cfgSourceRoots = [src]
-              , cfgOutputDir   = out
-              , cfgAnnotations = anns
-              , cfgVerbose     = True
-              }
+usage :: IO ()
+usage = do
+  hPutStrLn stderr "usage: chase <source-root> <output> [<annotations.json>] [<test-root>]"
+  hPutStrLn stderr ""
+  hPutStrLn stderr "  source-root        directory to scan for .hs and .purs files"
+  hPutStrLn stderr "  output             .chase file for bundle mode, or a directory for per-file mode"
+  hPutStrLn stderr "  annotations.json   optional; auto-detected from ./chase-annotations.json"
+  hPutStrLn stderr "  test-root          optional; if given, scan .hs files there for"
+  hPutStrLn stderr "                     test references to source functions (Haskell only)"
+  exitFailure
+
+runWith :: FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> IO ()
+runWith srcRoot output mAnn mTest = do
+  resolvedAnn  <- resolveAnnotationsPath mAnn
+  annMap       <- loadAnnotationsOrDie resolvedAnn
+  resolvedTest <- resolveTestRoot mTest
+  let cfg = defaultConfig
+        { cfgSourceRoots = [srcRoot]
+        , cfgOutputDir   = if ".chase" `isSuffixOf` output
+                              then "chase"
+                              else output
+        , cfgBundleFile  = if ".chase" `isSuffixOf` output
+                              then Just output
+                              else Nothing
+        , cfgAnnotations = annMap
+        , cfgTestRoots   = maybe [] (:[]) resolvedTest
+        , cfgVerbose     = True
+        }
   runChase cfg
 
--- | If the user gave an explicit path, use it (must exist).
--- Otherwise look for ./chase-annotations.json. Missing default is fine
--- (silent empty annotations); missing explicit is a user error.
 resolveAnnotationsPath :: Maybe FilePath -> IO (Maybe FilePath)
 resolveAnnotationsPath = \case
   Just p -> do
@@ -54,43 +68,32 @@ resolveAnnotationsPath = \case
     if exists
       then pure (Just p)
       else do
-        hPutStrLn stderr $ "error: annotations file not found: " <> p
+        hPutStrLn stderr $ "annotations file does not exist: " <> p
         exitFailure
   Nothing -> do
     exists <- doesFileExist defaultAnnotationsPath
     pure $ if exists then Just defaultAnnotationsPath else Nothing
 
-loadAnnotationsOrDie
-  :: Maybe FilePath -> IO (Map Text ModuleAnnotations)
-loadAnnotationsOrDie Nothing = pure Map.empty
-loadAnnotationsOrDie (Just p) = do
-  result <- loadAnnotations p
-  case result of
-    Right m -> do
-      putStrLn $ "load   " <> p <> " (" <> show (Map.size m) <> " modules)"
-      pure m
-    Left e -> do
-      hPutStrLn stderr $ "error: " <> e
-      exitFailure
+resolveTestRoot :: Maybe FilePath -> IO (Maybe FilePath)
+resolveTestRoot = \case
+  Just p -> do
+    exists <- doesDirectoryExist p
+    if exists
+      then pure (Just p)
+      else do
+        hPutStrLn stderr $ "test root directory does not exist: " <> p
+        exitFailure
+  Nothing -> pure Nothing
 
-usage :: String -> IO ()
-usage prog = do
-  hPutStrLn stderr $ "error: expected 2 or 3 arguments"
-  hPutStrLn stderr ""
-  mapM_ (hPutStrLn stderr)
-    [ "usage: " <> prog <> " <source-root> <output> [<annotations.json>]"
-    , ""
-    , "  source-root        directory to walk for .hs files"
-    , "  output             if it ends in .chase, written as a single"
-    , "                     concatenated bundle file; otherwise treated"
-    , "                     as a directory for per-file .chase output"
-    , "  annotations.json   optional path to annotations JSON file."
-    , "                     If omitted, ./chase-annotations.json is used"
-    , "                     when present. If the explicit path is given"
-    , "                     and missing, this is a hard error."
-    , ""
-    , "examples:"
-    , "  " <> prog <> " backend/src cheeblr.chase"
-    , "  " <> prog <> " backend/src cheeblr.chase ./chase-annotations.json"
-    ]
-  exitFailure
+loadAnnotationsOrDie :: Maybe FilePath -> IO (Map Text ModuleAnnotations)
+loadAnnotationsOrDie = \case
+  Nothing -> pure Map.empty
+  Just p  -> do
+    res <- loadAnnotations p
+    case res of
+      Left err -> do
+        hPutStrLn stderr err
+        exitFailure
+      Right m -> do
+        putStrLn $ "load   " <> p <> " (" <> show (Map.size m) <> " modules)"
+        pure m

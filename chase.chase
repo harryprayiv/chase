@@ -1,7 +1,7 @@
 %bundle chase v1
-%generated 2026-05-11T21:22:12Z
+%generated 2026-05-11T21:50:01Z
 %roots /home/bismuth/git/chase/src
-%files 8 ok, 0 failed
+%files 9 ok, 0 failed
 
 # This file is a chase bundle: structural skeletons of multiple
 # Haskell and PureScript source files concatenated into one document.
@@ -9,7 +9,8 @@
 # Blocks contain the rendered .chase format: %file, %mod, %lang,
 # %ext (Haskell only), %fixity, %uses, %const, %topology, data decls,
 # %foreign (PureScript only), %pattern, type signatures with
-# attached invariants and consumers, %decision blocks, %open_issue
+# attached invariants and consumers, ? tested-by lines (when test
+# coverage analysis was enabled), %decision blocks, %open_issue
 # blocks (known problems with blocking/affects targets), and parse
 # errors. Function bodies are deliberately omitted; the lines
 # beginning with ! after a signature are the behavioral facts you
@@ -131,6 +132,118 @@ parseTopology :: A.Value -> AT.Parser Topology
   affects: parseRoot
 
 
+=== BEGIN Chase/Coverage.hs ===
+
+%file /home/bismuth/git/chase/src/Chase/Coverage.hs
+%mod Chase.Coverage
+
+%ext LambdaCase, OverloadedStrings, RecordWildCards
+
+%uses qualified Data.Generics as SYB
+%uses Data.Generics
+%uses Data.List
+%uses qualified Data.Map.Strict as Map
+%uses Data.Map.Strict
+%uses qualified Data.Text as T
+%uses Data.Text
+%uses GHC.Hs
+%uses GHC.Hs.Decls
+%uses GHC.Hs.Binds
+%uses GHC.Hs.Expr
+%uses GHC.Parser.Annotation
+%uses GHC.Types.SrcLoc
+%uses GHC.Types.Name.Reader
+%uses GHC.Types.Name.Occurrence
+%uses Chase.Types
+%uses qualified Chase.Parse.Haskell as HSP
+
+data TestBinding = TestBinding
+  { tbModule   :: Text
+  , tbFunction :: Text
+  , tbLine     :: Int
+  , tbRefs     :: [Text]
+  }
+  deriving Show
+
+type TestRefIndex = Map Text [TestRef]
+
+parseTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
+  ! intent: Read a single Haskell test file and extract its top-level FunBindings with their referenced variable names
+  ! effects: IO
+  ! delegates parsing to Chase.Parse.Haskell.parseHsModule (same parser used for source files; no separate test parser)
+  ! ParseFailure is returned as Left; the pipeline prints a warning and skips the file
+  ! module name comes from Chase.Parse.Haskell.moduleNameOf; '' for files without a module header
+  > consumed by: Chase.Pipeline.buildTestIndexOrEmpty (called once per test file when cfgTestRoots is non-empty)
+
+scanTestFile :: Text -> HsModule GhcPs -> [TestBinding]
+  ! pure: takes an already-parsed HsModule and returns one TestBinding per top-level FunBind
+  ! PatBinds, ClsInstD, type/class/data decls all produce zero TestBindings; only FunBind matches
+  ! the tbRefs field is deduplicated via Data.List.nub; a test binding that mentions foo five times produces one occurrence in tbRefs
+
+fromDecl :: Text -> LHsDecl GhcPs -> [TestBinding]
+  ! internal helper used by scanTestFile; pattern-matches on the LHsDecl and returns a singleton or empty list
+  ! the line number comes from startLine on the declaration's SrcSpan, same convention as Chase.Parse.Haskell
+
+buildTestIndex :: [TestBinding] -> TestRefIndex
+  ! inverts a flat list of TestBindings into a Map from referenced name to list of TestRefs
+  ! self-references (a binding referring to its own name, i.e. recursion) are filtered out before indexing; see decision SelfReferencesAreDropped
+  ! within a single index entry, TestRefs are deduplicated by (trModule, trFunction) and sorted by trSrcLine
+  ! duplicate refs from the same (module, function) are coalesced; the line of the FIRST occurrence wins after sorting
+  > consumed by: Chase.Pipeline.buildTestIndexOrEmpty (single caller; the index is then handed to every attachCoverage call)
+
+attachCoverage :: TestRefIndex -> ChaseFile -> ChaseFile
+  ! intent: Populate chaseTestCoverage by looking up each signature, foreign import, and pattern name in the index
+  ! iterates chaseSignatures, then chaseForeignImports, then chasePatterns; produces one entry per name in those lists
+  ! the value for a name with no test refs is the empty list, NOT a missing key; this lets the renderer emit 'no test references' explicitly
+  ! the result is always Just <list>, never Nothing; Nothing is the 'didn't run' state that only emptyChaseFile produces
+  > consumed by: Chase.Pipeline.applyPasses (only caller; runs after attachAnnotations, only when cfgTestRoots is non-empty)
+
+collectVarsIn :: Data a => a -> [Text]
+  ! polymorphic in the input: any Data-derived AST node works (MatchGroup, GRHSs, HsExpr, anything reachable from a FunBind body)
+  ! visits every subterm via SYB.everything; the HsVar query fires anywhere a variable reference appears in expression position
+  ! constructor patterns, type-level references, and identifier-position references in pattern matches are NOT collected; only HsVar in expressions
+  ! result is a flat [Text] of unqualified names; deduplication happens at the call site via nub
+
+rdrNameToText :: RdrName -> Text
+  ! duplicated from Chase.Parse.Haskell to avoid importing internal helpers across modules
+  ! extracts occNameString via rdrNameOcc; produces the unqualified identifier text
+
+startLine :: SrcSpan -> Int
+  ! duplicated from Chase.Parse.Haskell for the same reason
+  ! RealSrcSpan -> 1-indexed start line; UnhelpfulSpan -> 0
+
+%decision StaticReferenceScanNotHPC
+  what:    Coverage is computed by walking each test file's AST and collecting HsVar references, NOT by running tests under HPC instrumentation
+  why:     HPC is the canonical Haskell coverage tool but requires actually running the test suite (cabal test --enable-coverage) and parsing .tix files. That couples chase to your build system, your test runner, and the cwd at the time of running. Static reference scanning is offline: just parse test source. No build system involvement, no execution required, runs in milliseconds. The honest tradeoff: a name reference is NOT proof of behavioral testing. A test that mentions foo could be using it as a type annotation, a side dependency, or even printing its source line in a diagnostic. The output is a smell test (zero references = almost certainly untested), not a guarantee. If you need true coverage, run HPC separately; chase is not a replacement for it. The intent of the ? line is to surface obvious gaps cheaply, not to certify coverage.
+  affects: scanTestFile, buildTestIndex, collectVarsIn
+
+%decision TopLevelFunBindOnly
+  what:    Only top-level FunBindings are recorded as test bindings; PatBindings and nested let-bindings are not surfaced as tests
+  why:     A test in Haskell is almost always 'testFooHandlesX = ...' (a FunBind). PatBindings like '(a, b) = setup' produce values, not test cases, and tying them to a test name is awkward (which of a or b is 'the test'?). Refs inside the RHS of a PatBind that ARE relevant get picked up indirectly: the PatBind's body is part of the module, and any FunBind whose body references those names will still produce TestRefs. The PatBind itself just isn't a 'test'. Nested let-bindings are deliberately ignored. Their refs are picked up by collectVarsIn walking the enclosing FunBind body, so we don't lose coverage signal, we just don't get a 'tested by: SomeModule.someNestedHelper' line.
+  affects: fromDecl, scanTestFile
+
+%decision SelfReferencesAreDropped
+  what:    buildTestIndex filters out the case where a test binding references its own name (recursion)
+  why:     Recursive helpers like 'go n = if n <= 0 then [] else n : go (n - 1)' would otherwise appear as 'go tested by: TestModule.go', which is uninformative noise. The filter is safe: a real production function with the same name as a test binding would still show up if any OTHER test binding references it. We only drop the self-loop.
+  affects: buildTestIndex
+
+%decision SYBTraversalForRobustness
+  what:    collectVarsIn uses SYB's 'everything' combinator over the Data instance instead of hand-rolled HsExpr traversal
+  why:     HsExpr has 30+ constructors (HsApp, HsLam, HsLet, HsCase, HsIf, HsDo, HsTuple, HsList, HsOpApp, SectionL, SectionR, HsRecordCon, ExprWithTySig, ...) and ghc-lib-parser adds new ones across minor versions. A hand-rolled recursive traversal must enumerate every constructor and call itself on every sub-expression, and miss any new constructor silently. SYB.everything walks any Data-derived structure generically: it visits every subterm and applies our HsVar query wherever it fires. New AST constructors are picked up automatically with no change here. The cost is one extra dependency (syb) and the small runtime overhead of generic dispatch. For chase's scale (parse hundreds of test files once) this is invisible.
+  affects: collectVarsIn
+
+%open_issue UnqualifiedNameMatching
+  what:     Test refs are matched by unqualified name only; two source modules exporting the same function name will both receive the same test refs
+  why:      collectVarsIn extracts occNameString from RdrName, dropping any qualifier. A test that calls 'Chase.Parse.parseSourceFile' and a test that calls 'Chase.Parse.Haskell.parseSourceFile' both produce a TestRef keyed by 'parseSourceFile'. When the chase output renders, both Chase.Parse.parseSourceFile and Chase.Parse.Haskell.parseSourceFile signatures get the SAME tested-by list. One is accurate, the other is a false positive. Fix: extract qualifiers from Qual RdrNames and match the qualifier prefix against the source module name during attachment. Requires plumbing the source module name through attachCoverage.
+  blocking: accurate coverage attribution in projects with naming collisions across modules
+  affects:  collectVarsIn, attachCoverage, buildTestIndex
+
+%open_issue HigherOrderReferencesMissed
+  what:     A test that exercises foo via a higher-order indirection or stored reference can produce false negatives; a test that exercises foo through a renamed alias can also miss
+  why:      The HsVar walker catches anything that lexically appears in expression position with the target name. List-of-functions like '[foo, bar]' is fine; foo and bar appear as HsVar. Things genuinely missed: function references introduced by Template Haskell splices (the splice output is what we'd want to walk, but ghc-lib-parser doesn't run splices); refs hidden behind generic dispatch (Generic-deriving, instance method dispatch); refs that only appear at the type level (rare for tests); refs accessed exclusively through a record-selector field or a type class method where the underlying function name is never lexically present in the test. These are inherent limits of static analysis without name resolution. Documenting them is more honest than promising they don't exist.
+  affects:  collectVarsIn
+
+
 === BEGIN Chase/Parse/Haskell.hs ===
 
 %file /home/bismuth/git/chase/src/Chase/Parse/Haskell.hs
@@ -167,13 +280,22 @@ parseTopology :: A.Value -> AT.Parser Topology
 %uses GHC.Utils.Outputable
 %uses Chase.Types
 
-parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
-  ! intent: Parse one .hs file via ghc-lib-parser, return either a structural skeleton or a diagnostic
+parseHsModule :: FilePath -> IO (Either ParseFailure (Text, HsModule GhcPs))
+  ! intent: Parse one .hs file via ghc-lib-parser, return the source text and AST or a diagnostic
   ! effects: IO
   ! reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer
   ! applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts
   ! ParseFailure is data, not an exception; the caller decides whether to skip or abort
   ! GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required
+  ! returns the source text alongside the AST so callers that want the raw AST (Chase.Coverage) don't re-read the file
+  > consumed by: Chase.Parse.Haskell.parseSourceFile (wraps this and runs extractStructure)
+  > consumed by: Chase.Coverage.parseTestFile (uses just the AST and module name)
+
+parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
+  ! intent: Thin wrapper over parseHsModule that runs extractStructure on the result
+  ! effects: IO
+  ! delegates the actual parser work to parseHsModule
+  ! extractStructure populates the ChaseFile from the HsModule
   > consumed by: Chase.Parse.parseSourceFile (the dispatcher invokes this for .hs files)
 
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
@@ -190,11 +312,13 @@ extractStructure
   :: FilePath -> Text -> [Text] -> HsModule GhcPs -> ChaseFile
   ! produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls
   ! constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations
+  ! chaseTestCoverage is left Nothing here; populated by Chase.Coverage.attachCoverage in a later pass when cfgTestRoots is set
 
 renderParseError :: PState -> Text
 
 moduleNameOf :: HsModule GhcPs -> Text
   ! returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)
+  ! exported for use by Chase.Coverage when building TestBindings from test files
 
 importsOf :: HsModule GhcPs -> [Text]
   ! pretty-prints each import via GHC's Outputable; the renderer in Chase.Render then collapses whitespace and strips the explicit name list
@@ -270,7 +394,12 @@ probedToolSettings :: Settings.ToolSettings
 %decision ParserIsGhcLibParser
   what:    Use ghc-lib-parser as the parser; no manual fixity or extension list
   why:     ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions. The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax. ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks. Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state.
-  affects: parseSourceFile
+  affects: parseSourceFile, parseHsModule
+
+%decision RawAstExposedForCoverage
+  what:    parseHsModule is exposed alongside parseSourceFile and returns the raw HsModule plus source text
+  why:     Chase.Coverage needs to walk the test file's AST to collect HsVar references. The structural-skeleton ChaseFile produced by parseSourceFile has thrown that information away. Re-parsing test files inside Chase.Coverage would duplicate the parser setup (probedSettings, applySourcePragmas, etc.); exposing parseHsModule and consuming it from Coverage keeps the parser logic in one place. parseSourceFile is now a thin wrapper over parseHsModule + extractStructure, which also simplifies the original function.
+  affects: parseHsModule, parseSourceFile
 
 %decision PragmasReadFromSourceTextNotAst
   what:    LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST
@@ -534,36 +663,61 @@ parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
 %uses Chase.Types
 %uses Chase.Parse
 %uses Chase.Render
+%uses qualified Chase.Coverage as Coverage
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
   , cfgOutputDir   :: FilePath
   , cfgBundleFile  :: Maybe FilePath
   , cfgAnnotations :: Map Text ModuleAnnotations
+  , cfgTestRoots   :: [FilePath]
   , cfgVerbose     :: Bool
   }
 
 defaultConfig :: ChaseConfig
   ! all fields default to empty/Nothing/False
   ! callers override via record syntax; no Reader monad, no env vars
+  ! cfgTestRoots defaults to []; coverage analysis is OFF by default
 
 runChase :: ChaseConfig -> IO ()
+  ! builds the test index FIRST (one pass over all test files), then dispatches to runPerFile or runBundled with the index in hand
+  ! the order matters: source-file parsing depends on the index, so it must exist before the source pass
   ! dispatches on cfgBundleFile: Nothing means per-file mode, Just means bundle mode
-  ! the two modes share parsing and annotation attachment but differ in output handling and failure tracking
 
-runPerFile :: ChaseConfig -> IO ()
+buildTestIndexOrEmpty :: ChaseConfig -> IO Coverage.TestRefIndex
+  ! intent: Parse every .hs file under cfgTestRoots and build the global ref index; return Map.empty if cfgTestRoots is empty
+  ! effects: IO
+  ! filters cfgTestRoots files by takeExtension == '.hs'; .purs is NOT scanned (coverage is Haskell-only)
+  ! uses findSourceFiles for the recursive walk; same code path as source roots, so the same .hs/.purs filter is in effect, but we re-filter to .hs only at this level
+  ! test file parse failures print a warning and contribute zero bindings; the overall run continues
+  ! prints 'test roots:', 'scan <path>', and 'index <N> distinct names' lines when cfgVerbose
+  > consumed by: Chase.Pipeline.runChase (only caller)
+
+runPerFile :: ChaseConfig -> Coverage.TestRefIndex -> IO ()
   ! writes one .chase file per source file, mirroring the directory tree under cfgOutputDir
   ! parse failures are printed but NOT counted; success and failure are visually mixed in stdout
   ! drift warnings are printed inline as files are processed
-  > consumed by: the bare runner when cfgBundleFile is Nothing
+  ! coverage is attached via applyPasses; the rendered output includes ? lines iff cfgTestRoots was non-empty
+  > consumed by: Chase.Pipeline.runChase when cfgBundleFile is Nothing
 
-runBundled :: ChaseConfig -> FilePath -> IO ()
+runBundled :: ChaseConfig -> FilePath -> Coverage.TestRefIndex -> IO ()
   ! intent: Concatenate all module skeletons into one file with a counted preamble
   ! effects: IO
   ! successesRef and failuresRef are IORef counters used in the preamble
   ! ORDER: parse all files first (collecting blocks and counts), THEN render the preamble, THEN write everything in one TIO.writeFile
   ! this means the preamble counters are accurate at write time even though the preamble appears first in the file
-  > consumed by: the bare runner when cfgBundleFile is Just
+  ! coverage is attached via applyPasses; rendered ? lines appear in each bundle block iff cfgTestRoots was non-empty
+  > consumed by: Chase.Pipeline.runChase when cfgBundleFile is Just
+
+applyPasses
+  :: Map Text ModuleAnnotations
+  -> [FilePath]
+  -> Coverage.TestRefIndex
+  -> ChaseFile
+  -> ChaseFile
+  ! composes attachAnnotations and (conditionally) Chase.Coverage.attachCoverage
+  ! attachCoverage runs only when cfgTestRoots is non-empty; otherwise the ChaseFile leaves with chaseTestCoverage = Nothing and the renderer emits no ? lines
+  ! the order is fixed: annotations first, coverage second. Coverage attachment iterates chaseSignatures/chaseForeignImports/chasePatterns, all of which are populated by parsing (not by annotations), so the order doesn't matter for correctness but is fixed for predictability
 
 renderPreamble :: [FilePath] -> Int -> Int -> IO Text
 
@@ -576,7 +730,7 @@ attachAnnotations
   ! intent: Merge a ModuleAnnotations into a parsed ChaseFile by module name lookup
   ! no-op if the module name is not in the annotation map
   ! REPLACES the four annotation fields rather than merging (see decision AttachReplacesNotMerges)
-  > consumed by: Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (every parsed file passes through here)
+  > consumed by: Chase.Pipeline.applyPasses (every parsed file passes through here)
 
 checkAnnotationDrift :: ChaseFile -> [Text]
   ! intent: Find invariants, decision affects, and open-issue affects that reference functions not present in the file
@@ -600,6 +754,7 @@ findSourceFiles :: FilePath -> IO [FilePath]
   ! filters by takeExtension in ('.hs', '.purs'); .lhs and .hsc are NOT included
   ! non-existent root returns empty list (silent); does not warn
   ! the returned list mixes both languages in alphabetical order; Chase.Parse.parseSourceFile handles per-file dispatch
+  ! also used by buildTestIndexOrEmpty for the test-root walk; the .hs filter is re-applied at the caller for the test path
 
 %decision AttachReplacesNotMerges
   what:    attachAnnotations OVERWRITES chaseConstants/chaseInvariants/chaseDecisions/chaseTopologies from the matching ModuleAnnotations
@@ -611,20 +766,28 @@ findSourceFiles :: FilePath -> IO [FilePath]
   why:     Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler. consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too. Open-issue blocking entries are also not drift-checked: they commonly name downstream services or features rather than functions in the same module. The result is that consumes and blocking entries can rot silently. Documented in the README as a known limitation.
   affects: checkAnnotationDrift
 
+%decision CoverageIndexIsBuiltOnce
+  what:    buildTestIndexOrEmpty parses every test file once before the source pass begins; the resulting TestRefIndex is shared by every source file
+  why:     Coverage attribution is global: a test in test/AuthSpec.hs referencing 'lookupSession' attaches to whichever source file defines lookupSession (modulo the documented UnqualifiedNameMatching limitation). Parsing test files per source-file would be O(sources * tests); parsing once and indexing is O(sources + tests). If cfgTestRoots is empty, this function returns Map.empty immediately and never touches the filesystem. A test file that fails to parse prints a warning and contributes zero TestBindings; the rest of the index is unaffected, so coverage analysis degrades gracefully.
+  affects: buildTestIndexOrEmpty, applyPasses
+
 
 === BEGIN Chase/Render.hs ===
 
 %file /home/bismuth/git/chase/src/Chase/Render.hs
 %mod Chase.Render
 
+%ext OverloadedStrings, RecordWildCards
+
 %uses qualified Data.Text as T
 %uses Data.Text
 %uses Chase.Types
 
 renderChaseFile :: ChaseFile -> Text
-  ! fixed top-down order: header, %ext, %uses, %const, %topology, data decls, signatures+invariants+consumes, %decision, parse errors
+  ! fixed top-down order: header, %ext, %fixity, %uses, %const, %topology, data decls, %foreign, patterns, signatures, %decision, %open_issue, parse errors
   ! the order is a contract: it is what an LLM trained or prompted on the chase format will expect to see
   ! swapping any two top-level sections is a breaking change to the format
+  ! the %foreign section is rendered only for non-empty chaseForeignImports (PureScript) and is omitted for Haskell files (which leave that field empty)
 
 renderExtensions :: [Text] -> [Text]
 
@@ -646,13 +809,52 @@ renderTopologies :: [Topology] -> [Text]
 
 renderDataDecls :: [ChaseDataDecl] -> [Text]
 
-renderPatternsWithInvariants :: [Pattern] -> [Invariant] -> [Text]
+renderForeignImports
+  :: [Signature]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+  ! emits a '%foreign' header line, then one block per Signature using the same renderSig helper as top-level signatures
+  ! empty input -> empty output (no header)
+  ! coverage attaches to foreign imports the same way it does to top-level signatures; the ? line appears under each foreign import when coverage is enabled
+  > consumed by: Chase.Render.renderChaseFile (single caller; the renderer is the only thing that knows the %foreign section exists)
 
-renderSignaturesWithInvariants :: [Signature] -> [Invariant] -> [Text]
-  ! ORDER per signature: signature verbatim, then '!' lines (invariants), then '>' lines (consumed by), then optional hint, then blank line
-  ! if a signature has no matching invariant, only the signature and a blank line are emitted
+renderPatternsWithInvariants
+  :: [Pattern]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+  ! renders each pattern synonym with its invariant (if any) and coverage line (if enabled)
+  ! empty input -> empty output (no header is emitted; patterns just appear in sequence with signatures)
+
+renderSignaturesWithInvariants
+  :: [Signature]
+  -> [Invariant]
+  -> Maybe [(Text, [TestRef])]
+  -> [Text]
+  ! ORDER per signature: signature verbatim, then '!' lines (invariants), then '>' lines (consumed by), then optional hint, then '?' line (coverage if enabled), then blank line
+  ! if a signature has no matching invariant and coverage is disabled, only the signature and a blank line are emitted
   ! the lookup is by exact sigName match; case-sensitive
-  > consumed by: any LLM consumer of chase output relies on this ordering to distinguish facts from consumer pointers
+  > consumed by: any LLM consumer of chase output relies on this ordering to distinguish facts from consumer pointers from coverage hints
+
+renderSig
+  :: [(Text, Invariant)]
+  -> Maybe [(Text, [TestRef])]
+  -> Signature
+  -> [Text]
+  ! internal helper shared by renderSignaturesWithInvariants and renderForeignImports
+  ! produces one signature block: verbatim + invariant lines + consumed-by lines + body hint + coverage line + blank
+  ! the order is fixed and is the visual contract for LLM consumers
+
+renderCoverage :: Text -> Maybe [(Text, [TestRef])] -> [Text]
+  ! Nothing -> [] (no coverage analysis ran; emit nothing)
+  ! Just covMap with no entry for the name -> [] (defensive; should not happen because attachCoverage populates every name)
+  ! Just covMap with empty refs -> ['  ? no test references']
+  ! Just covMap with refs -> ['  ? tested by: M1.f1, M2.f2, ...'] (single line, comma-joined)
+
+renderTestRef :: TestRef -> Text
+  ! formats a single TestRef as '<module>.<function>'
+  ! line numbers are dropped from the rendered output; they're retained in the TestRef value for any future use
 
 renderDecisions :: [Decision] -> [Text]
   ! each decision renders as four lines: %decision <name>, what:, why:, affects:
@@ -666,13 +868,18 @@ renderParseErrors :: [Text] -> [Text]
 
 %decision OneLineFactsForLLMScannability
   what:    Every annotation renders as one line per fact, indented two spaces under the signature it describes
-  why:     The audience is an LLM working under a context budget. Multi-line wrapped paragraphs hide structure and waste tokens. Sigils (! invariant, > consumed-by) let the model retrieve facts by category without parsing prose. Indentation under the signature attaches each fact to its function unambiguously, even when many functions share a module.
-  affects: renderSignaturesWithInvariants, renderConstants, renderDecisions
+  why:     The audience is an LLM working under a context budget. Multi-line wrapped paragraphs hide structure and waste tokens. Sigils (! invariant, > consumed-by, ? coverage) let the model retrieve facts by category without parsing prose. Indentation under the signature attaches each fact to its function unambiguously, even when many functions share a module.
+  affects: renderSignaturesWithInvariants, renderConstants, renderDecisions, renderCoverage
 
 %decision ImportsCollapseAndDropNames
   what:    Each import becomes one line; the explicit name list inside parens is dropped
   why:     The LLM does not benefit from knowing you imported (sort, nub) specifically; it benefits from knowing you imported Data.List. Multi-line imports with long name lists are the single biggest source of wasted tokens in raw Haskell source.
   affects: renderImports, collapseImport
+
+%decision CoverageIsSuppressedWhenNotAnalyzed
+  what:    If chaseTestCoverage is Nothing, no ? lines are emitted anywhere; if Just <list>, every signature/foreign/pattern gets a ? line
+  why:     The Nothing -> silent rule keeps structure-only output clean for users who don't pass a test root. The Just -> always-emit rule (including 'no test references' for empty entries) is the useful surface: gaps are what the user cares about. Silencing 'no test references' would hide the most actionable information. The Maybe lives on ChaseFile so the renderer is fully driven by data, no flag plumbing through the helper functions.
+  affects: renderCoverage, renderSig
 
 
 === BEGIN Chase/Types.hs ===
@@ -698,12 +905,12 @@ data ChaseFile = ChaseFile
   { chaseSourcePath     :: FilePath
   , chaseLanguage       :: SourceLanguage
   , chaseModuleName     :: Text
-  , chaseExtensions     :: [Text]          -- Haskell only; empty for PureScript
+  , chaseExtensions     :: [Text]
   , chaseFixities       :: [Fixity]
   , chaseImports        :: [Text]
   , chaseSignatures     :: [Signature]
-  , chaseForeignImports :: [Signature]     -- PureScript only; empty for Haskell
-  , chasePatterns       :: [Pattern]       -- Haskell only; empty for PureScript
+  , chaseForeignImports :: [Signature]
+  , chasePatterns       :: [Pattern]
   , chaseDataDecls      :: [ChaseDataDecl]
   , chaseConstants      :: [Constant]
   , chaseInvariants     :: [Invariant]
@@ -711,6 +918,7 @@ data ChaseFile = ChaseFile
   , chaseOpenIssues     :: [OpenIssue]
   , chaseTopologies     :: [Topology]
   , chaseParseErrors    :: [Text]
+  , chaseTestCoverage   :: Maybe [(Text, [TestRef])]
   }
   deriving stock (Show, Generic)
 
@@ -794,9 +1002,17 @@ data Topology = Topology
   }
   deriving stock (Show, Generic)
 
+data TestRef = TestRef
+  { trModule   :: Text
+  , trFunction :: Text
+  , trSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
 emptyChaseFile :: SourceLanguage -> FilePath -> ChaseFile
   ! all annotation fields default to empty; structural fields are filled in by Chase.Parse.extractStructure
   ! chaseSourcePath is the only field set at construction; everything else is added later
+  ! chaseTestCoverage defaults to Nothing; Chase.Coverage.attachCoverage flips it to Just when coverage analysis runs
 
 emptyAnnotations :: Text -> ModuleAnnotations
   ! annModName is set; the four annotation lists default to empty
@@ -830,6 +1046,11 @@ openIssue :: Text -> Text -> Text -> [Text] -> [Text] -> OpenIssue
   what:    Invariant = function name + ! lines + > consumes + optional hint
   why:     invLines and invConsumes are rendered with different sigils (! vs >) and carry different semantics: facts vs downstream pointers. Keeping them as separate list fields rather than merging into one tagged list keeps the JSON loader simple and the renderer's job mechanical. invBodyHint is the escape hatch for cases where the body genuinely matters and the annotator wants to point at it.
   affects: inv, invHinted
+
+%decision TestCoverageIsMaybeNotEmpty
+  what:    chaseTestCoverage is Maybe [(Text, [TestRef])], not just [(Text, [TestRef])]
+  why:     Nothing means 'coverage analysis did not run for this build'; Just [] would conflate 'analyzed and nothing tested anything' with 'never analyzed'. The renderer needs to distinguish: Nothing -> emit no ? lines at all (clean output when the feature is off); Just <list> -> emit ? lines on every signature (including 'no test references' for the uncovered ones, which is the useful information). Without the Maybe, you cannot tell a structure-only run from a covered-but-all-empty run by inspecting the chase output.
+  affects: emptyChaseFile
 
 
 === BEGIN Chase.hs ===

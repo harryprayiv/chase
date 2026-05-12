@@ -3,6 +3,8 @@
 
 module Chase.Parse.Haskell
   ( parseSourceFile
+  , parseHsModule
+  , moduleNameOf
   ) where
 
 import qualified Data.Text          as T
@@ -38,11 +40,12 @@ import GHC.Utils.Outputable      (ppr, showSDocUnsafe)
 
 import Chase.Types
 
-parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
-parseSourceFile path = do
+-- | Raw parse: returns the source text and the AST so other passes
+-- (Chase.Coverage) can walk it without re-parsing.
+parseHsModule :: FilePath -> IO (Either ParseFailure (Text, HsModule GhcPs))
+parseHsModule path = do
   bytes <- BS.readFile path
   let sourceText  = TE.decodeUtf8 bytes
-      sourceLines = T.lines sourceText
       buf         = stringToStringBuffer (T.unpack sourceText)
       dflags      = applySourcePragmas path buf (defaultDynFlags probedSettings)
       pOpts       = initParserOpts dflags
@@ -50,9 +53,17 @@ parseSourceFile path = do
       pstate0     = initParserState pOpts buf startLoc
   case unP parseModule pstate0 of
     POk _ locModule ->
-      pure $ Right $ extractStructure path sourceText sourceLines (unLoc locModule)
+      pure $ Right (sourceText, unLoc locModule)
     PFailed pst ->
       pure $ Left $ ParseFailure path (renderParseError pst)
+
+parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
+parseSourceFile path = do
+  result <- parseHsModule path
+  pure $ case result of
+    Left pf -> Left pf
+    Right (sourceText, hsmod) ->
+      Right $ extractStructure path sourceText (T.lines sourceText) hsmod
 
 
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
