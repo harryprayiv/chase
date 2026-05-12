@@ -34,10 +34,28 @@
         "type": "github"
       }
     },
+    "purescript-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773484092,
+        "narHash": "sha256-a71w1M36PQ/cZxe1VZH0vamL7Hjxs7YQDhQD6hHdOLQ=",
+        "owner": "purescript",
+        "repo": "purescript",
+        "rev": "4c66c05a59a08b698ba5c34b48e8bf7744ecb9f6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "purescript",
+        "ref": "v0.15.16",
+        "repo": "purescript",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "purescript-src": "purescript-src"
       }
     },
     "systems": {

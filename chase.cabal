@@ -1,66 +1,158 @@
-cabal-version:   3.0
-name:            chase
-version:         0.1.0.0
-synopsis:        Structural compression of Haskell and PureScript source for LLM context
-description:
-  Reads Haskell and PureScript source files and emits a compressed
-  .chase representation suitable for LLM context. Combines automatic
-  structural extraction (types, imports, data decls, foreign imports)
-  with hand-curated invariants, decisions, open issues, and state
-  machine topologies supplied via a sidecar annotations module.
-author:          Harry Pray IV
-license:         BSD-3-Clause
-build-type:      Simple
+cabal-version:      3.0
+name:               chase
+version:            0.1.0.0
+synopsis:           Compress Haskell + PureScript source into LLM context skeletons
+description:        Walks Haskell and PureScript source trees and emits a
+                    structural skeleton (signatures, foreign imports, data
+                    declarations, fixities, test coverage cross-refs) suitable
+                    for feeding to LLMs as context.
+license:            AGPL-3.0-or-later
+license-file:       LICENSE
+author:             Harry Pray
+maintainer:         harry@prayivanil.org
+copyright:          (c) 2025 Harry Pray
+build-type:         Simple
+extra-source-files:
+  README.md
+  chase-annotation.json
 
 common warnings
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates
-               -Wincomplete-uni-patterns -Wmissing-export-lists
-               -Wmissing-home-modules -Wpartial-fields
-               -Wredundant-constraints
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+  default-language: Haskell2010
+
+-- ------------------------------------------------------------------
+-- Vendored PureScript CST
+--
+-- These are upstream files from purescript/purescript at tag v0.15.16
+-- copied verbatim and renamed from Language.PureScript.* to
+-- Chase.Vendor.PureScript.*. They are kept in an internal library
+-- so their language extensions and Prelude conventions don't bleed
+-- into chase's own source.
+-- ------------------------------------------------------------------
+
+library vendor-purescript-cst
+  import:           warnings
+  hs-source-dirs:   vendor/purescript-cst
+  default-extensions:
+    BangPatterns
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DeriveFunctor
+    DeriveFoldable
+    DeriveTraversable
+    DeriveGeneric
+    DerivingStrategies
+    DerivingVia
+    EmptyDataDecls
+    FlexibleContexts
+    FlexibleInstances
+    GeneralizedNewtypeDeriving
+    ImportQualifiedPost
+    KindSignatures
+    LambdaCase
+    MultiParamTypeClasses
+    NamedFieldPuns
+    PatternGuards
+    PatternSynonyms
+    RankNTypes
+    RecordWildCards
+    OverloadedRecordDot
+    OverloadedStrings
+    ScopedTypeVariables
+    TupleSections
+    TypeFamilies
+    ViewPatterns
+  exposed-modules:
+    Chase.Vendor.PureScript.CST.Types
+    Chase.Vendor.PureScript.CST.Lexer
+    Chase.Vendor.PureScript.CST.Layout
+    Chase.Vendor.PureScript.CST.Parser
+    Chase.Vendor.PureScript.CST.Errors
+    Chase.Vendor.PureScript.CST.Monad
+    Chase.Vendor.PureScript.CST.Positions
+    Chase.Vendor.PureScript.CST.Utils
+    Chase.Vendor.PureScript.CST.Flatten
+    Chase.Vendor.PureScript.Names
+    Chase.Vendor.PureScript.PSString
+    Chase.Vendor.PureScript.Roles
+    Chase.Vendor.Control.Monad.Supply.Class
+    Chase.Vendor.PureScript.AST.SourcePos
+    Chase.Vendor.Control.Monad.Supply
+    Chase.Vendor.PureScript.Comments
+    Chase.Vendor.PureScript.CST.Print
+    Chase.Vendor.PureScript.CST.Traversals
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , aeson                >= 2.0
+    , array
+    , bytestring
+    , containers
+    , deepseq
+    , dlist
+    , hashable
+    , mtl
+    , parallel
+    , scientific
+    , text
+    , transformers
+    , utf8-string
+    , serialise
+    , vector
+    , filepath
+    , protolude
+  build-tool-depends:
+    happy:happy >= 1.20
+
+-- ------------------------------------------------------------------
+-- chase library proper
+-- ------------------------------------------------------------------
 
 library
-  import:             warnings
-  hs-source-dirs:     src
-  default-language:   GHC2021
-  default-extensions: OverloadedStrings
-                    , LambdaCase
-                    , RecordWildCards
-                    , DeriveGeneric
-                    , StrictData
-                    , DerivingStrategies
-                    , BlockArguments
-  exposed-modules:    Chase
-                    , Chase.Types
-                    , Chase.Parse
-                    , Chase.Parse.Haskell
-                    , Chase.Parse.PureScript
-                    , Chase.Render
-                    , Chase.Pipeline
-                    , Chase.Annotations.Json
-                    , Chase.Coverage
+  import:           warnings
+  hs-source-dirs:   src
+  default-extensions:
+    LambdaCase
+    OverloadedStrings
+    ScopedTypeVariables
+  exposed-modules:
+    Chase.Annotations.Json
+    Chase.Coverage
+    Chase.Parse
+    Chase.Parse.Haskell
+    Chase.Parse.PureScript
+    Chase.Pipeline
+    Chase.Render
+    Chase.Types
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , aeson                >= 2.0
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , ghc-lib-parser
+    , syb
+    , text
+    , vendor-purescript-cst
 
-  build-depends:      base                 >= 4.18  && < 5
-                    , text                 >= 2.0   && < 3
-                    , containers           >= 0.6
-                    , directory            >= 1.3
-                    , filepath             >= 1.4
-                    , time                 >= 1.12
-                    , aeson                >= 2.0
-                    , bytestring
-                    , ghc-lib-parser
-                    , syb                  >=0.7
+-- ------------------------------------------------------------------
+-- chase executable
+-- ------------------------------------------------------------------
 
 executable chase
-  import:             warnings
-  main-is:            Main.hs
-  hs-source-dirs:     app
-  default-language:   GHC2021
-  default-extensions: OverloadedStrings
-                    , RecordWildCards
-                    , LambdaCase
-  build-depends:      directory ^>=1.3.8.5
-                    , base
-                    , chase
-                    , text
-                    , containers
-                    , ghc-lib-parser
+  import:           warnings
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , base
+    , chase
+    , text

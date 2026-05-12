@@ -4,22 +4,44 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    purescript-src = {
+      url = "github:purescript/purescript/v0.15.16";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, purescript-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs  = import nixpkgs { inherit system; };
         hpkgs = pkgs.haskell.packages.ghc910;
 
+        vendor-purescript-cst = import ./vendor.nix {
+          inherit pkgs purescript-src;
+        };
+
         cheeblr-dist = hpkgs.callCabal2nix "cheeblr-dist" ./. { };
       in {
-        packages.default      = cheeblr-dist;
-        packages.cheeblr-dist = cheeblr-dist;
+        packages.default               = cheeblr-dist;
+        packages.cheeblr-dist          = cheeblr-dist;
+        packages.vendor-purescript-cst = vendor-purescript-cst;
 
         apps.default = {
           type    = "app";
           program = "${cheeblr-dist}/bin/cheeblr-dist";
+        };
+
+        apps.vendor-purescript-cst = {
+          type = "app";
+          program = toString (pkgs.writeShellScript "install-vendor-purescript-cst" ''
+            set -euo pipefail
+            target="$PWD/vendor/purescript-cst"
+            rm -rf "$target"
+            mkdir -p "$target"
+            cp -r ${vendor-purescript-cst}/. "$target/"
+            chmod -R u+rw "$target"
+            echo "Vendored purescript CST to $target"
+          '');
         };
 
         devShells.default = hpkgs.shellFor {
@@ -33,61 +55,3 @@
         };
       });
 }
-
-
-
-
-# _---__-
-
-
-# {
-#   description = "chase — fantasy baseball points engine";
-
-#   inputs = {
-#     haskellNix.url = "github:input-output-hk/haskell.nix";
-#     nixpkgs.follows = "haskellNix/nixpkgs-unstable";
-
-#     iohkNix = {
-#       url = "github:input-output-hk/iohk-nix";
-#       inputs.nixpkgs.follows = "nixpkgs";
-#     };
-
-#     hackage = {
-#       url = "github:input-output-hk/hackage.nix";
-#       flake = false;
-#     };
-
-#     flake-utils.url = "github:numtide/flake-utils";
-
-#     flake-compat = {
-#       url = "github:edolstra/flake-compat";
-#       flake = false;
-#     };
-
-#     sops-nix = {
-#       url = "github:Mic92/sops-nix";
-#       inputs.nixpkgs.follows = "nixpkgs";
-#     };
-#   };
-
-#   outputs = inputs@{ self, flake-utils, ... }:
-#     let
-#       build = import ./nix/build.nix { inherit inputs; };
-#     in
-#       flake-utils.lib.eachSystem build.systems (system: build.perSystem system);
-
-#   nixConfig = {
-#     extra-experimental-features = [ "nix-command flakes" "ca-derivations" ];
-#     allow-import-from-derivation = "true";
-#     extra-substituters = [
-#       "https://cache.iog.io"
-#       "https://cache.nixos.org"
-#       "https://hercules-ci.cachix.org"
-#     ];
-#     extra-trusted-public-keys = [
-#       "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ="
-#       "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
-#       "hercules-ci.cachix.org-1:ZZeDl9Va+xe9j+KqdzoBZMFJHVQ42Uu/c/1/KMC5Lw0="
-#     ];
-#   };
-# }
