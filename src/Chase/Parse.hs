@@ -6,7 +6,6 @@ module Chase.Parse
   ) where
 
 import qualified Data.Text       as T
-import           Data.Text       (Text)
 import           System.FilePath (takeExtension)
 
 import           Chase.Types

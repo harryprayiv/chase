@@ -19,9 +19,9 @@ import Control.Monad (forM, forM_, when)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Time (getCurrentTime, defaultTimeLocale, formatTime)
 import System.Directory
-  ( createDirectoryIfMissing, doesDirectoryExist, listDirectory )
+  ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory )
 import System.FilePath
-  ( (</>), (<.>), takeDirectory, takeExtension
+  ( (</>), (<.>), takeDirectory, takeExtension, takeFileName
   , dropExtension, makeRelative, equalFilePath
   )
 import qualified Data.List
@@ -57,9 +57,9 @@ runChase cfg = do
     Nothing     -> runPerFile  cfg testIdx
     Just bundle -> runBundled  cfg bundle testIdx
 
--- | Parse every .hs file under cfgTestRoots and build the global
--- reference index. If cfgTestRoots is empty, returns an empty map and
--- the rest of the pipeline emits no ? lines.
+-- | Parse every .hs and .purs file under cfgTestRoots and build the
+-- global reference index. If cfgTestRoots is empty, returns an empty
+-- map and the rest of the pipeline emits no ? lines.
 buildTestIndexOrEmpty :: ChaseConfig -> IO Coverage.TestRefIndex
 buildTestIndexOrEmpty ChaseConfig{..}
   | null cfgTestRoots = pure Map.empty
@@ -69,8 +69,8 @@ buildTestIndexOrEmpty ChaseConfig{..}
         putStrLn $ "test roots: "
                 <> Data.List.intercalate ", " cfgTestRoots
       files <- concat <$> mapM findSourceFiles cfgTestRoots
-      let hsFiles = filter (\p -> takeExtension p == ".hs") files
-      bindings <- forM hsFiles \p -> do
+      let testFiles = filter (\p -> takeExtension p `elem` [".hs", ".purs"]) files
+      bindings <- forM testFiles \p -> do
         when cfgVerbose $ putStrLn $ "scan   " <> p
         result <- Coverage.parseTestFile p
         case result of
@@ -142,8 +142,6 @@ runBundled ChaseConfig{..} bundlePath testIdx = do
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
 
--- | Compose attachAnnotations and attachCoverage; the latter only runs
--- if cfgTestRoots is non-empty (the testIdx is meaningless otherwise).
 applyPasses
   :: Map Text ModuleAnnotations
   -> [FilePath]
@@ -252,22 +250,27 @@ relativeToRoots roots src =
         | root <- roots
         , let rel = makeRelative root src
         , not (equalFilePath rel src)
+        , rel /= "."
         ]
   in case candidates of
        (r:_) -> r
-       []    -> src
+       []    -> takeFileName src
 
 findSourceFiles :: FilePath -> IO [FilePath]
 findSourceFiles root = do
-  exists <- doesDirectoryExist root
-  if not exists
-    then pure []
+  isFile <- doesFileExist root
+  if isFile
+    then pure [ root | takeExtension root `elem` [".hs", ".purs"] ]
     else do
-      entries <- Data.List.sort <$> listDirectory root
-      let fullPaths = map (root </>) entries
-      results <- forM fullPaths \p -> do
-        isDir <- doesDirectoryExist p
-        if isDir
-          then findSourceFiles p
-          else pure [ p | takeExtension p `elem` [".hs", ".purs"] ]
-      pure (concat results)
+      exists <- doesDirectoryExist root
+      if not exists
+        then pure []
+        else do
+          entries <- Data.List.sort <$> listDirectory root
+          let fullPaths = map (root </>) entries
+          results <- forM fullPaths \p -> do
+            isDir <- doesDirectoryExist p
+            if isDir
+              then findSourceFiles p
+              else pure [ p | takeExtension p `elem` [".hs", ".purs"] ]
+          pure (concat results)

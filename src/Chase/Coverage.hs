@@ -18,6 +18,7 @@ import qualified Data.Map.Strict  as Map
 import           Data.Map.Strict  (Map)
 import qualified Data.Text        as T
 import           Data.Text        (Text)
+import           System.FilePath  (takeExtension)
 
 import GHC.Hs                    (HsModule (..), GhcPs)
 import GHC.Hs.Decls              (HsDecl (..), LHsDecl)
@@ -30,7 +31,8 @@ import GHC.Types.Name.Reader     (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
 
 import           Chase.Types
-import qualified Chase.Parse.Haskell as HSP
+import qualified Chase.Parse.Haskell    as HSP
+import qualified Chase.Parse.PureScript as PSP
 
 -- | One top-level function binding in a test module, with the set of
 -- variable names that appear inside its body.
@@ -45,11 +47,18 @@ data TestBinding = TestBinding
 type TestRefIndex = Map Text [TestRef]
 
 
--- | Read a .hs file from disk and extract its top-level test bindings.
--- Parse failures are surfaced as Left; the caller decides whether to
--- skip the file or abort.
+-- | Read a test file from disk and extract its top-level test bindings.
+-- Dispatches by extension: .hs uses ghc-lib-parser via Chase.Parse.Haskell,
+-- .purs uses the vendored CST via Chase.Parse.PureScript. Parse failures
+-- are surfaced as Left; the caller decides whether to skip the file or
+-- abort.
 parseTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
-parseTestFile path = do
+parseTestFile path = case takeExtension path of
+  ".purs" -> parsePureScriptTestFile path
+  _       -> parseHaskellTestFile path
+
+parseHaskellTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
+parseHaskellTestFile path = do
   result <- HSP.parseHsModule path
   pure $ case result of
     Left pf          -> Left pf
@@ -57,7 +66,17 @@ parseTestFile path = do
       let modName = HSP.moduleNameOf hsmod
       in Right (scanTestFile modName hsmod)
 
--- | Pure: extract TestBindings from an already-parsed module.
+parsePureScriptTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
+parsePureScriptTestFile path = do
+  result <- PSP.scanTestBindings path
+  pure $ case result of
+    Left pf -> Left pf
+    Right (modName, entries) -> Right
+      [ TestBinding modName fn ln refs
+      | (fn, ln, refs) <- entries
+      ]
+
+-- | Pure: extract TestBindings from an already-parsed Haskell module.
 scanTestFile :: Text -> HsModule GhcPs -> [TestBinding]
 scanTestFile modName hsmod =
   concatMap (fromDecl modName) (hsmodDecls hsmod)
@@ -95,7 +114,7 @@ buildTestIndex bindings = Map.fromListWith mergeRefs raw
 -- | Attach coverage info to a ChaseFile by looking up each signature,
 -- foreign import, and pattern name in the index. The result is always
 -- Just (never Nothing), so the renderer emits a ? line for every
--- entry (either \"tested by: ...\" or \"no test references\").
+-- entry (either "tested by: ..." or "no test references").
 attachCoverage :: TestRefIndex -> ChaseFile -> ChaseFile
 attachCoverage idx cf = cf
   { chaseTestCoverage = Just $
@@ -109,7 +128,7 @@ attachCoverage idx cf = cf
 
 -- | SYB walk: find every HsVar occurrence in any subterm. Reaches
 -- inside let, case, do, lambda, application, sections, record
--- construction, all of it.
+-- construction, all of it. Haskell-only.
 collectVarsIn :: Data a => a -> [Text]
 collectVarsIn = SYB.everything (++) (SYB.mkQ [] visit)
   where

@@ -1,99 +1,207 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main (main) where
 
-import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
-import Data.Text (Text)
-import Data.List (isSuffixOf)
-import System.Environment (getArgs)
-import System.Exit (exitFailure)
-import System.Directory (doesFileExist, doesDirectoryExist)
-import System.IO (hPutStrLn, stderr)
+import           Options.Applicative
+import           Control.Monad           (unless, filterM)
+import           Data.Map.Strict         (Map)
+import qualified Data.Map.Strict         as Map
+import           Data.Maybe              (catMaybes)
+import           Data.Text               (Text)
+import           Data.List               (intercalate, isSuffixOf)
+import           System.Directory        ( doesFileExist
+                                         , doesDirectoryExist
+                                         , getCurrentDirectory
+                                         )
+import           System.FilePath         ( takeDirectory
+                                         , takeBaseName
+                                         , (</>)
+                                         )
+import           System.IO               (hPutStrLn, stderr)
+import           System.Exit             (exitFailure)
 
-import Chase.Pipeline
-import Chase.Annotations.Json
-import Chase.Types
+import qualified Chase.Pipeline          as Pipeline
+import qualified Chase.Annotations.Json  as Anno
+import           Chase.Types             (ModuleAnnotations)
 
-defaultAnnotationsPath :: FilePath
-defaultAnnotationsPath = "chase-annotations.json"
+
+data Options = Options
+  { optSource      :: FilePath
+  , optOutput      :: Maybe FilePath
+  , optAnnotations :: AnnotationsMode
+  , optTests       :: TestsMode
+  , optQuiet       :: Bool
+  }
+
+data AnnotationsMode = AnnAuto | AnnFile FilePath | AnnOff
+data TestsMode       = TestsAuto | TestsExplicit [FilePath] | TestsOff
+
 
 main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    [src, out] ->
-      runWith src out Nothing Nothing
-    [src, out, ann] ->
-      runWith src out (Just ann) Nothing
-    [src, out, ann, test] ->
-      runWith src out (Just ann) (Just test)
-    _ -> usage
+main = execParser parserInfo >>= run
 
-usage :: IO ()
-usage = do
-  hPutStrLn stderr "usage: chase <source-root> <output> [<annotations.json>] [<test-root>]"
-  hPutStrLn stderr ""
-  hPutStrLn stderr "  source-root        directory to scan for .hs and .purs files"
-  hPutStrLn stderr "  output             .chase file for bundle mode, or a directory for per-file mode"
-  hPutStrLn stderr "  annotations.json   optional; auto-detected from ./chase-annotations.json"
-  hPutStrLn stderr "  test-root          optional; if given, scan .hs files there for"
-  hPutStrLn stderr "                     test references to source functions (Haskell only)"
-  exitFailure
+parserInfo :: ParserInfo Options
+parserInfo = info (helper <*> options)
+  ( fullDesc
+ <> progDesc "Compress Haskell and PureScript source into LLM context skeletons."
+ <> header "chase - structural source compressor"
+  )
 
-runWith :: FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> IO ()
-runWith srcRoot output mAnn mTest = do
-  resolvedAnn  <- resolveAnnotationsPath mAnn
-  annMap       <- loadAnnotationsOrDie resolvedAnn
-  resolvedTest <- resolveTestRoot mTest
-  let cfg = defaultConfig
-        { cfgSourceRoots = [srcRoot]
-        , cfgOutputDir   = if ".chase" `isSuffixOf` output
-                              then "chase"
-                              else output
-        , cfgBundleFile  = if ".chase" `isSuffixOf` output
-                              then Just output
-                              else Nothing
-        , cfgAnnotations = annMap
-        , cfgTestRoots   = maybe [] (:[]) resolvedTest
-        , cfgVerbose     = True
-        }
-  runChase cfg
+options :: Parser Options
+options = Options
+  <$> argument str
+        ( metavar "SOURCE"
+       <> help "File or directory to scan for .hs and .purs sources"
+        )
+  <*> optional
+        ( strOption
+            ( long "output"
+           <> short 'o'
+           <> metavar "PATH"
+           <> help "Output path. Ending in .chase = bundle mode. \
+                   \Anything else = per-file output directory. \
+                   \Default: <source-basename>.chase in CWD."
+            )
+        )
+  <*> annotationsOpt
+  <*> testsOpt
+  <*> switch
+        ( long "quiet"
+       <> short 'q'
+       <> help "Suppress progress output."
+        )
+  where
+    annotationsOpt =
+          ( AnnFile <$> strOption
+              ( long "annotations"
+             <> short 'a'
+             <> metavar "FILE"
+             <> help "Annotations JSON path. \
+                     \Default: auto-detect chase-annotation.json \
+                     \or chase-annotations.json in CWD, source dir, \
+                     \or source parent."
+              )
+          )
+      <|> flag' AnnOff
+              ( long "no-annotations"
+             <> help "Disable annotation enrichment."
+              )
+      <|> pure AnnAuto
 
-resolveAnnotationsPath :: Maybe FilePath -> IO (Maybe FilePath)
-resolveAnnotationsPath = \case
-  Just p -> do
-    exists <- doesFileExist p
-    if exists
-      then pure (Just p)
-      else do
-        hPutStrLn stderr $ "annotations file does not exist: " <> p
-        exitFailure
-  Nothing -> do
-    exists <- doesFileExist defaultAnnotationsPath
-    pure $ if exists then Just defaultAnnotationsPath else Nothing
+    testsOpt =
+          ( TestsExplicit . splitCommas <$> strOption
+              ( long "tests"
+             <> short 't'
+             <> metavar "DIR[,DIR..]"
+             <> help "Test root(s) to scan for references. \
+                     \Default: auto-detect test/, tests/, spec/ \
+                     \adjacent to source."
+              )
+          )
+      <|> flag' TestsOff
+              ( long "no-tests"
+             <> help "Disable test reference scanning."
+              )
+      <|> pure TestsAuto
 
-resolveTestRoot :: Maybe FilePath -> IO (Maybe FilePath)
-resolveTestRoot = \case
-  Just p -> do
-    exists <- doesDirectoryExist p
-    if exists
-      then pure (Just p)
-      else do
-        hPutStrLn stderr $ "test root directory does not exist: " <> p
-        exitFailure
-  Nothing -> pure Nothing
 
-loadAnnotationsOrDie :: Maybe FilePath -> IO (Map Text ModuleAnnotations)
-loadAnnotationsOrDie = \case
-  Nothing -> pure Map.empty
-  Just p  -> do
-    res <- loadAnnotations p
-    case res of
-      Left err -> do
-        hPutStrLn stderr err
-        exitFailure
-      Right m -> do
-        putStrLn $ "load   " <> p <> " (" <> show (Map.size m) <> " modules)"
-        pure m
+run :: Options -> IO ()
+run opts = do
+  let source = optSource opts
+  srcIsFile <- doesFileExist source
+  srcIsDir  <- doesDirectoryExist source
+  unless (srcIsFile || srcIsDir) $ do
+    hPutStrLn stderr $ "chase: source not found: " <> source
+    exitFailure
+
+  let output = case optOutput opts of
+        Just o  -> o
+        Nothing -> takeBaseName source <> ".chase"
+
+  annPath  <- resolveAnnotations source srcIsDir (optAnnotations opts)
+  annMap   <- loadAnnotationsOrDie (optQuiet opts) annPath
+  testDirs <- resolveTests source srcIsDir (optTests opts)
+
+  let isBundle = ".chase" `isSuffixOf` output
+      cfg = Pipeline.defaultConfig
+              { Pipeline.cfgSourceRoots = [source]
+              , Pipeline.cfgOutputDir   = if isBundle then "chase" else output
+              , Pipeline.cfgBundleFile  = if isBundle then Just output else Nothing
+              , Pipeline.cfgAnnotations = annMap
+              , Pipeline.cfgTestRoots   = testDirs
+              , Pipeline.cfgVerbose     = not (optQuiet opts)
+              }
+  Pipeline.runChase cfg
+
+
+resolveAnnotations
+  :: FilePath -> Bool -> AnnotationsMode -> IO (Maybe FilePath)
+resolveAnnotations _ _ AnnOff      = pure Nothing
+resolveAnnotations _ _ (AnnFile f) = do
+  ok <- doesFileExist f
+  if ok then pure (Just f) else do
+    hPutStrLn stderr $ "chase: annotations file not found: " <> f
+    exitFailure
+resolveAnnotations source isDir AnnAuto = do
+  cwd <- getCurrentDirectory
+  let sourceDir
+        | isDir     = source
+        | otherwise = takeDirectory source
+      parent     = takeDirectory sourceDir
+      dirs       = [cwd, sourceDir, parent]
+      names      = ["chase-annotation.json", "chase-annotations.json"]
+      candidates = [d </> n | d <- dirs, n <- names]
+  findFirst doesFileExist candidates
+
+
+resolveTests :: FilePath -> Bool -> TestsMode -> IO [FilePath]
+resolveTests _ _ TestsOff           = pure []
+resolveTests _ _ (TestsExplicit ds) = catMaybes <$> mapM checkDir ds
+  where
+    checkDir d = do
+      ok <- doesDirectoryExist d
+      if ok then pure (Just d) else do
+        hPutStrLn stderr $ "chase: warning: test dir not found: " <> d
+        pure Nothing
+resolveTests source isDir TestsAuto = do
+  let sourceDir
+        | isDir     = source
+        | otherwise = takeDirectory source
+      parent     = takeDirectory sourceDir
+      candidates = [parent </> "test", parent </> "tests", parent </> "spec"]
+  found <- filterM doesDirectoryExist candidates
+  case found of
+    [] -> pure []
+    ds -> do
+      hPutStrLn stderr $ "chase: test roots " <> intercalate ", " ds
+      pure ds
+
+
+loadAnnotationsOrDie
+  :: Bool -> Maybe FilePath -> IO (Map Text ModuleAnnotations)
+loadAnnotationsOrDie _     Nothing  = pure Map.empty
+loadAnnotationsOrDie quiet (Just p) = do
+  res <- Anno.loadAnnotations p
+  case res of
+    Left err -> do
+      hPutStrLn stderr err
+      exitFailure
+    Right m -> do
+      unless quiet $
+        putStrLn $ "load   " <> p
+                <> " (" <> show (Map.size m) <> " modules)"
+      pure m
+
+
+findFirst :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
+findFirst _ []     = pure Nothing
+findFirst p (x:xs) = do
+  ok <- p x
+  if ok then pure (Just x) else findFirst p xs
+
+splitCommas :: String -> [String]
+splitCommas s = case break (== ',') s of
+  (before, [])      -> [before]
+  (before, _:after) -> before : splitCommas after

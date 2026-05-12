@@ -1,4 +1,3 @@
--- src/Chase/Parse/PureScript.hs
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -26,8 +25,6 @@ import qualified Chase.Vendor.PureScript.Names      as N
 import           Chase.Types
 
 
--- Public entry points
-
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
 parseSourceFile path = do
   result <- parseCstFile path
@@ -46,8 +43,6 @@ scanTestBindings path = do
       Right (moduleName m, extractTestBindings m)
 
 
--- Parse to CST
-
 parseCstFile
   :: FilePath -> IO (Either ParseFailure (Text, CST.Module ()))
 parseCstFile path = do
@@ -60,14 +55,16 @@ parseCstFile path = do
         Left errs ->
           pure $ Left $ ParseFailure path (renderParserErrors errs)
         Right partial ->
-          pure $ Right (src, PSParser.resPartial partial)
+          case snd (PSParser.resFull partial) of
+            Left errs ->
+              pure $ Left $ ParseFailure path (renderParserErrors errs)
+            Right fullModule ->
+              pure $ Right (src, fullModule)
 
 renderParserErrors :: NonEmpty CSTErr.ParserError -> Text
 renderParserErrors errs =
-  T.intercalate "; " $ map (T.pack . show) (NE.toList errs)
+  T.intercalate "\n  " $ map (T.pack . CSTErr.prettyPrintError) (NE.toList errs)
 
-
--- CST -> ChaseFile
 
 extractStructure :: FilePath -> Text -> CST.Module () -> ChaseFile
 extractStructure path src cstModule =
@@ -91,8 +88,6 @@ extractStructure path src cstModule =
        }
 
 
--- Test binding extraction
-
 extractTestBindings :: CST.Module () -> [(Text, Int, [Text])]
 extractTestBindings cstModule =
   mapMaybe valueBindingRefs (CST.modDecls cstModule)
@@ -106,8 +101,6 @@ valueBindingRefs = \case
     in Just (fnName, line, filter (/= fnName) refs)
   _ -> Nothing
 
-
--- Per-declaration extractors
 
 extractImport :: CST.ImportDecl () -> Text
 extractImport idecl =
@@ -199,8 +192,6 @@ extractFixity lns (decl, startL, _) = case decl of
     in Just (Fixity verbatim [opName] startL)
   _ -> Nothing
 
-
--- Reference collection (CST tree walker)
 
 collectValueBindingRefs :: CST.ValueBindingFields () -> [Text]
 collectValueBindingRefs vbf =
@@ -294,8 +285,6 @@ collectFromDoStatement = \case
   CST.DoBind _ _ e     -> collectFromExpr e
 
 
--- Wrapped/Separated/Delimited helpers
-
 delimitedToList :: CST.Delimited a -> [a]
 delimitedToList (CST.Wrapped _ Nothing _)    = []
 delimitedToList (CST.Wrapped _ (Just sep) _) = sepToList sep
@@ -306,8 +295,6 @@ delimitedNonEmptyToList (CST.Wrapped _ sep _) = sepToList sep
 sepToList :: CST.Separated a -> [a]
 sepToList (CST.Separated hd tl) = hd : map snd tl
 
-
--- Declaration line ranges via "next decl's start line minus one"
 
 declRanges
   :: [CST.Declaration ()]
@@ -339,8 +326,6 @@ declStartLine = \case
   CST.DeclRole _ tok _ _ _         -> tokenLine tok
 
 
--- Source slicing
-
 sliceLines :: [Text] -> Int -> Int -> Text
 sliceLines lns startL endL =
   let n        = endL - startL + 1
@@ -355,8 +340,6 @@ sliceFirstLine lns startL =
     (l:_) -> l
     []    -> ""
 
-
--- Name extraction
 
 moduleName :: CST.Module a -> Text
 moduleName m = N.runModuleName (CST.nameValue (CST.modNamespace m))
