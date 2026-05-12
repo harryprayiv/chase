@@ -275,6 +275,19 @@
             "Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface."
           ],
           "affects": ["applySourcePragmas"]
+        },
+        {
+          "name": "CppHandledByLineBlanking",
+          "what": "Files declaring LANGUAGE CPP are preprocessed by blanking out every line whose first non-whitespace character is '#'; both branches of #if/#else survive",
+          "why": [
+            "Without preprocessing, ghc-lib-parser fails on real codebases the moment a CPP directive appears (Grace.Compat was the trigger: 'parse error on input #'). The parser itself does no CPP handling; GHC's driver normally invokes a preprocessor before parsing, but chase runs the parser standalone.",
+            "Blanking (replacing each '#'-prefixed line with an empty line) is preferred over deleting because every SrcSpan in the resulting AST still indexes into the original source line list with correct line numbers. Deleting would shift everything below the first directive.",
+            "BOTH branches of #if/#else are kept on purpose. chase exists to give an LLM a structural skeleton; for compat shims (Grace.Compat has two fromAesonMap signatures with different types, one per branch), seeing both is more informative than picking one. Producing technically un-compilable Haskell is acceptable because chase is not a compiler.",
+            "The alternative is cpphs. Rejected because (a) cabal-style MIN_VERSION_pkg(major,minor,patch) macros are undefined in this context and expand to invalid syntax inside #if expressions, (b) cpphs picks exactly one branch, throwing away the dual-signature structural information chase exists to surface, and (c) adds a dependency for marginal benefit.",
+            "Known degradation paths, surfaced via the existing parse-failure pipeline rather than silently mishandled: a CPP conditional that splits a single expression across branches (rare in idiomatic Haskell) produces two non-overlapping fragments and fails to parse; '#define' directives are stripped rather than expanded, so code that depends on macro substitution in a syntactically critical position will also fail.",
+            "Detection is driven by pragmasFromSource: only files with LANGUAGE CPP in the preamble are preprocessed. Files without CPP pay no cost. pragmasFromSource already treats '#'-prefixed lines as preamble lines, so the scan walks past any CPP directives near the top to find subsequent {-# LANGUAGE ... #-} blocks."
+          ],
+          "affects": ["preprocessCpp", "needsCpp", "parseHsModule"]
         }
       ],
       "invariants": {
@@ -282,7 +295,9 @@
           "intent": "Parse one .hs file via ghc-lib-parser, return the source text and AST or a diagnostic",
           "effects": ["IO"],
           "notes": [
-            "reads the file as ByteString, decodes as UTF-8, builds a StringBuffer for the lexer",
+            "reads the file as ByteString, decodes as UTF-8",
+            "runs preprocessCpp on the decoded text BEFORE constructing the StringBuffer; LANGUAGE CPP files have their '#'-prefixed lines blanked, all other files pass through unchanged",
+            "the sourceText returned in the Right branch is the POST-preprocessing text, so every SrcSpan in the AST indexes correctly into T.lines sourceText for later slicing",
             "applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts",
             "ParseFailure is data, not an exception; the caller decides whether to skip or abort",
             "GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required",
@@ -304,21 +319,42 @@
             "Chase.Parse.parseSourceFile (the dispatcher invokes this for .hs files)"
           ]
         },
-        "extractStructure": [
-          "produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls",
-          "constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations",
-          "chaseTestCoverage is left Nothing here; populated by Chase.Coverage.attachCoverage in a later pass when cfgTestRoots is set"
+        "preprocessCpp": {
+          "intent": "If the source declares LANGUAGE CPP, blank out every line whose first non-whitespace character is '#'; otherwise return the source unchanged",
+          "notes": [
+            "pure function; no IO, no FFI, no external preprocessor binary",
+            "blanks rather than deletes: each stripped line becomes T.empty so line numbers in the resulting text match line numbers in the original source one-for-one",
+            "only acts when needsCpp returns True; files without LANGUAGE CPP pay one preamble scan and no other cost",
+            "the check on each line uses T.stripStart before testing for a leading '#', so directives that the C standard permits to be indented are also stripped",
+            "{-# LANGUAGE ... #-} pragma blocks start with '{-#' rather than bare '#' and are therefore preserved verbatim; applySourcePragmas can still extract extension flags from the preprocessed buffer",
+            "preserves BOTH branches of #if/#else as live code in the output; this is deliberate per decision CppHandledByLineBlanking"
+          ],
+          "consumes": [
+            "Chase.Parse.Haskell.parseHsModule (single caller; runs before StringBuffer construction)"
+          ]
+        },
+        "needsCpp": [
+          "checks whether the literal string 'CPP' appears as a parsed extension name in pragmasFromSource",
+          "case-sensitive exact match; 'cpp' or 'Cpp' would not trigger preprocessing, matching GHC's handling of LANGUAGE names",
+          "pure function over the source text; called once per parseHsModule invocation"
         ],
         "applySourcePragmas": {
           "intent": "Read LANGUAGE pragmas from source via getOptions, apply each to DynFlags, return the updated flags",
           "notes": [
             "must run BEFORE initParserOpts; the parser snapshots ExtBits at construction time",
+            "operates on the POST-preprocessing buffer; CPP-stripped files still carry their {-# LANGUAGE ... #-} blocks intact, so getOptions sees the same pragma set as the raw source",
             "getOptions takes (ParserOpts, [String] supportedExts, StringBuffer, FilePath) - the supported list comes from supportedLanguagesAndExtensions applied to platformArchOS genericPlatform",
             "TemplateHaskell is special-cased to ALSO set TemplateHaskellQuotes; xopt_set does not walk impliedXFlags, and the `$` lexer rule is gated on TemplateHaskellQuotesBit (not TemplateHaskellBit)",
             "OPTIONS_GHC and -W flags returned by getOptions are silently dropped by parseExtensionFlag",
             "extension names that aren't in LangExt.Extension fall through silently"
           ]
         },
+        "extractStructure": [
+          "produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls",
+          "constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations",
+          "chaseTestCoverage is left Nothing here; populated by Chase.Coverage.attachCoverage in a later pass when cfgTestRoots is set",
+          "the sourceText and sourceLines arguments are the POST-preprocessing values from parseHsModule; for LANGUAGE CPP files, every blanked directive line is an empty string in sourceLines but the indices match the AST's SrcSpans"
+        ],
         "moduleNameOf": [
           "returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)",
           "exported for use by Chase.Coverage when building TestBindings from test files"
@@ -330,7 +366,8 @@
           "notes": [
             "extracts top-level TypeSig declarations AND class method signatures",
             "ClassDecl bodies have their tcdSigs walked separately by extractClassSig; both top-level and class-method sigs end up in the same flat [Signature] list",
-            "class methods are emitted with UNQUALIFIED names, same shape as top-level signatures, so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name"
+            "class methods are emitted with UNQUALIFIED names, same shape as top-level signatures, so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name",
+            "for CPP-preprocessed files, both branches of a #if/#else can produce a Signature with the same sigName but distinct sigSrcLine and sigVerbatim; the renderer treats each as a separate entry"
           ],
           "consumes": [
             "Chase.Render.renderSignaturesWithInvariants (the renderer assumes one Signature per top-level OR class-method binding)"
@@ -369,205 +406,331 @@
           "purely textual scan of the source preamble; does not touch the AST",
           "stops at the first non-blank, non-comment, non-pragma line",
           "extracts comma-separated extension lists from {-# LANGUAGE Foo, Bar #-} blocks",
-          "OPTIONS_GHC and other non-LANGUAGE pragmas are ignored"
+          "OPTIONS_GHC and other non-LANGUAGE pragmas are ignored",
+          "treats '#'-prefixed lines as preamble lines, so CPP directives at the top of a file do not terminate the pragma scan; this is what lets needsCpp detect LANGUAGE CPP before preprocessCpp runs"
         ]
       }
     },
-
     "Chase.Parse.PureScript": {
       "decisions": [
         {
-          "name": "LineBasedScannerNotAst",
-          "what": "PureScript is parsed by a column-0 anchor scanner over raw text, not by an AST library",
+          "name": "VendoredCstParserNotLineScanner",
+          "what": "PureScript is parsed by a vendored copy of the purs compiler's CST library (Chase.Vendor.PureScript.CST.*), producing a real AST; the previous column-0 anchor scanner is gone",
           "why": [
-            "No PureScript parser is available as a Haskell library without dragging the purs compiler in as a dependency. The compiler's parser is not packaged as a standalone library and is tightly coupled to its name-resolution and type-checking pipeline.",
-            "PureScript's strict indentation rule (top-level declarations always start in column 0, continuations are indented) makes a line-based scanner viable. Block boundaries are anchor lines; an anchor is a column-0 line that doesn't begin with '--', 'module ', or 'import '.",
-            "The cost is brittleness: any source that violates the column-0 assumption (preprocessing, unusual formatters, literate-style sources) breaks the scanner. The benefit is no large dependency, no version coupling to the PureScript compiler, and fast parsing."
+            "The line-based scanner was brittle: it anchored on column-0 lines, broke on unusual formatters, lost continuation lines in class method sigs, mishandled instance chains, and grew a maintenance tax every time PureScript surface syntax changed.",
+            "A real parser gives every declaration variant a typed handler. New CST constructors become a compiler error in the extractor (missing pattern match) instead of a silent miss.",
+            "purescript-cst on Hackage was the obvious dependency, but its release cadence tracks the purs compiler and its transitive dep graph is heavy. Vendoring under Chase.Vendor.PureScript.CST.* isolates that surface: chase's own code never imports purescript-cst directly, only the vendored modules.",
+            "Cost: the vendored copy must be resynced when PureScript adds language features. The vendor namespace is treated as opaque from chase's perspective; chase annotates only the consuming code in Chase.Parse.PureScript, not the vendor modules themselves.",
+            "Benefits the consumer sees: signatures now carry true multi-line verbatim text via SrcSpan slicing, foreign imports distinguish value/data/kind forms via CST constructors instead of substring matching, fixity declarations get operator names from runOpName instead of fallback word-list scanning, and value-binding bodies can be walked structurally for test coverage (scanTestBindings)."
           ],
-          "affects": ["isAnchor", "scanBlocks", "classifyAnchor"]
+          "affects": ["parseSourceFile", "parseCstFile", "extractStructure", "scanTestBindings"]
+        },
+        {
+          "name": "TwoStageParseViaResFull",
+          "what": "Parsing runs in two stages: PSParser.parseModule produces a partial result with unresolved layout, and resFull collapses the layout to yield the final Module; either stage can fail",
+          "why": [
+            "PureScript uses indentation-based layout, like Haskell. The lexer emits virtual layout tokens; parseModule produces an AST that still carries unresolved layout state alongside any structural parse errors it could not avoid.",
+            "resFull is the layout resolution pass. It can introduce additional errors (mismatched indentation, unterminated where-blocks) that weren't catchable during the initial parse.",
+            "Both stages return their errors as NonEmpty CSTErr.ParserError. parseCstFile checks both and funnels into the same ParseFailure message via renderParserErrors, so callers see one diagnostic format regardless of which stage failed.",
+            "This is the exact two-stage shape the upstream purs compiler uses. Reordering or merging the stages would mean reimplementing layout resolution, which is the heaviest piece of vendored code."
+          ],
+          "affects": ["parseCstFile", "renderParserErrors"]
+        },
+        {
+          "name": "DeclRangesByNextDeclStart",
+          "what": "declRanges assigns each declaration an end line equal to (next declaration's start line - 1); the last declaration ends at the file's total line count",
+          "why": [
+            "The CST does not carry a single SrcSpan that covers a declaration plus its trailing blank lines and adjacent comments. SrcSpans on individual sub-nodes (tokens, type bodies) exist, but stitching them into a whole-declaration span is fragile.",
+            "Using 'start of next decl - 1' as the end is a geometric heuristic: every line between two declaration anchors belongs to the earlier one. sliceLines then drops trailing blank lines via dropWhile, so the verbatim output stays tight.",
+            "Implication: trailing comments attach to the preceding declaration's chase output, which is usually what the author wanted. Leading comments before a declaration attach to the previous declaration instead, which is slightly worse but consistent and predictable.",
+            "Implication: a declaration whose body extends past the next anchor (impossible in idiomatic PureScript because every declaration starts at column 0 and continuations are indented under it) would be silently truncated. This has not been observed in practice."
+          ],
+          "affects": ["declRanges", "declStartLine", "sliceLines"]
         },
         {
           "name": "ForeignImportsAreSeparateFromSignatures",
-          "what": "foreign import declarations populate chaseForeignImports rather than chaseSignatures",
+          "what": "foreign import declarations populate chaseForeignImports rather than chaseSignatures, and all three foreign forms (value, data, kind) flow through the same extractor",
           "why": [
-            "Foreign imports bridge to a runtime FFI module (.js, .purs.js) and have a distinct review surface: changing one usually means changing JavaScript or another host-language file. Keeping them visually separate in the chase output flags this to the LLM consumer.",
-            "Mechanically the data is shape-compatible with Signature (name plus verbatim text), so they share the Signature type, just a different field on ChaseFile.",
-            "Both top-level 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms produce one entry; the latter extracts the type name rather than a value name."
+            "Foreign imports bridge to a runtime FFI module (.js); changing one usually means changing JavaScript or another host-language file. Visually separating them in chase output flags this distinct review surface to the LLM consumer.",
+            "Mechanically the data is shape-compatible with Signature (name plus verbatim text), so they share the Signature type and reuse renderSig in Chase.Render.",
+            "ForeignValue, ForeignData, and ForeignKind all produce a single Signature with the relevant identifier as the name. The CST distinguishes the forms; chase output doesn't, on the grounds that the verbatim text already shows which form was used."
           ],
-          "affects": ["toForeignSig", "foreignImportName", "extractStructure"]
-        },
-        {
-          "name": "ClassMethodsAndTopLevelSigsAreFlattened",
-          "what": "Class method signatures are extracted in a second pass and concatenated with top-level signatures into one flat list",
-          "why": [
-            "Top-level signatures come from blocks classified as DkSignature; class method signatures come from scanning DkClass block bodies for indented 'name :: ...' lines.",
-            "The two streams are disjoint in idiomatic PureScript because methods are indented inside the class body and would never be column-0 anchors themselves.",
-            "Flattening into one list matches the chase output contract: invariants attach to signatures by name regardless of whether the signature is a top-level binding or a class method."
-          ],
-          "affects": ["extractStructure", "toSignature", "classMethodSigs"]
+          "affects": ["extractForeignImport", "extractStructure"]
         },
         {
           "name": "HeadOnlyForClassInstanceDerive",
-          "what": "DkClass, DkInstance, and DkDerive blocks render only the first line of the source span, not the body",
+          "what": "DeclClass, DeclInstanceChain, and DeclDerive render only the first line of the declaration; the body is dropped",
           "why": [
-            "Class bodies are method signatures, already extracted separately by classMethodSigs. Rendering the body in toDataDecl would duplicate them.",
-            "Instance bodies are method definitions; chase deliberately drops function bodies, so dropping instance bodies is consistent.",
-            "Derive declarations are always one line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable.",
+            "Class bodies are method signatures, already extracted separately by extractClassMethods. Rendering the body in extractDataDecl would duplicate them.",
+            "Instance bodies are method definitions; chase deliberately drops function bodies everywhere else, so dropping instance bodies is consistent.",
+            "Derive declarations are always a single line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable.",
             "Same rule as Haskell mode (decision HeadOnlyForClassAndInstance in Chase.Parse.Haskell), kept in sync deliberately."
           ],
-          "affects": ["toDataDecl", "headOnly"]
+          "affects": ["extractDataDecl", "sliceFirstLine"]
+        },
+        {
+          "name": "ClassMethodsAndTopLevelSigsAreFlattened",
+          "what": "Class method signatures and top-level signatures end up in the same chaseSignatures list, concatenated after top-level extraction",
+          "why": [
+            "Top-level signatures come from DeclSignature; class method signatures come from the Labeled list inside DeclClass's body.",
+            "The two streams are disjoint in idiomatic PureScript because methods live inside the class block, never at the top level.",
+            "Flattening into one list matches the chase output contract: invariants attach to signatures by name regardless of whether the signature is a top-level binding or a class method.",
+            "A name collision between a top-level signature and a class method of the same name would cause both Signatures to be present, and an invariant for that name would attach to whichever one the renderer encounters first. This is rare enough that no extra disambiguation has been added."
+          ],
+          "affects": ["extractStructure", "extractSignature", "extractClassMethods"]
+        },
+        {
+          "name": "SelfReferencesFilteredAtExtractionTime",
+          "what": "valueBindingRefs filters out references to the binding's own name (recursion) before returning; this is the symmetric counterpart to Chase.Coverage.buildTestIndex's self-loop filter in Haskell mode",
+          "why": [
+            "Recursive helpers like 'go n = if n <= 0 then [] else go (n - 1)' would otherwise report 'go tested by: TestModule.go', which is uninformative noise.",
+            "In Haskell mode the filter lives in Chase.Coverage.buildTestIndex because the parser (Chase.Parse.Haskell) exposes the raw AST and Chase.Coverage does its own walk. In PureScript mode the equivalent walk happens inside this module via scanTestBindings, so the filter is placed at the natural site of the walk.",
+            "Either layer would produce the same observable behavior. The choice is determined by which module owns the AST traversal."
+          ],
+          "affects": ["valueBindingRefs"]
+        }
+      ],
+      "openIssues": [
+        {
+          "name": "InstanceChainTailIgnored",
+          "what": "DeclInstanceChain extracts only the first instance head; subsequent 'else instance' clauses produce no chase output",
+          "why": [
+            "DeclInstanceChain wraps a Separated InstanceHead, where the head is the first instance and the tail is the list of 'else instance' clauses. The pattern 'CST.Separated h _' in extractDataDecl discards the tail.",
+            "For an instance chain like 'instance fooString :: Foo String where ... else instance fooDefault :: Foo a where ...', only fooString shows up as a data decl. The default fallback case is invisible in chase output.",
+            "Fix is straightforward: iterate the Separated tail and emit one head-only ChaseDataDecl per element. The reason it hasn't been done is that no cheeblr file currently uses else-instance chains, so the gap hasn't bitten."
+          ],
+          "blocking": ["complete structural picture for type classes that use else-instance overlap"],
+          "affects": ["extractDataDecl"]
+        },
+        {
+          "name": "DeclRoleAndKindSignatureProduceNoOutput",
+          "what": "DeclRole and DeclKindSignature are recognized by declStartLine (so they bound neighboring decls' line ranges correctly) but no extractor handles them; they vanish from chase output",
+          "why": [
+            "Standalone kind signatures are increasingly used in modern PureScript and carry the same kind of type-level declaration information that DeclSignature carries for values. Losing them means the chase output for a module that uses 'type role'-style or 'kindsignature'-style declarations is missing structural context that the LLM would benefit from.",
+            "Role declarations are rarer; their absence from chase output is less material.",
+            "Fix: add a chaseKindSignatures field (or fold into chaseSignatures with a marker) and an extractor that pulls the verbatim text plus the type name. Requires a small addition to Chase.Types and Chase.Render."
+          ],
+          "blocking": ["chase output completeness for modules that use standalone kind signatures or role annotations"],
+          "affects": ["extractStructure", "declStartLine"]
+        },
+        {
+          "name": "OperatorNamesNotCollectedAsRefs",
+          "what": "collectFromExpr returns no ref for ExprOpName; operator-position uses in test code do not produce TestRefs against operator-form Signatures in source modules",
+          "why": [
+            "ExprOpName represents a reference to an operator at name-position (e.g. inside backticks or as an operator argument). Capturing it would require matching the qualified operator name against operator-form Signature names, which chase represents as parenthesized text in sigName.",
+            "Most PureScript operators come from Prelude or library code, not the same module under test. The signal-to-noise ratio of matching ExprOpName against same-module operator declarations is low.",
+            "ExprInfix DOES walk the operator sub-expression because the CST wraps it as a full Expr (the embedded form, not the name-only form). Tests that use `\\`identifier\\`` style infix application will produce a TestRef for the identifier."
+          ],
+          "blocking": ["coverage attribution for operator-only call sites"],
+          "affects": ["collectFromExpr"]
+        },
+        {
+          "name": "ClassMethodSignaturesAreFirstLineOnly",
+          "what": "toMethodSig slices only the first line of a method signature; multi-line method types lose their continuation lines in sigVerbatim",
+          "why": [
+            "The CST does carry the full Labeled-of-Ident-and-Type structure, so the type is available. The reason the verbatim text comes from the first source line instead of from a Type pretty-printer is that pretty-printing produces a normalized form which doesn't match the author's original formatting.",
+            "For single-line method sigs (the common case) the first-line slice is exact. For multi-line types it drops the continuation, leaving a truncated signature in chase output.",
+            "Two paths to fix: (a) extend toMethodSig to slice from the method's name-token line down to the last line of its type's SrcSpan, or (b) use the Type pretty-printer and accept the normalized form. Option (a) is more faithful and is the natural next step."
+          ],
+          "blocking": ["chase output fidelity for class methods with multi-line type signatures"],
+          "affects": ["toMethodSig"]
         }
       ],
       "invariants": {
         "parseSourceFile": {
-          "intent": "Read a .purs file as text, run the heuristic structure extractor, return either a ChaseFile or a ParseFailure",
+          "intent": "Parse a .purs file via the vendored CST library and return a ChaseFile or a ParseFailure",
           "effects": ["IO"],
           "notes": [
-            "uses TIO.readFile; any IO exception is caught via SomeException and converted to a ParseFailure with the read error message prefixed by 'read failed: '",
-            "there is no syntactic parse step: extraction is line-based and tolerant. A 'parse failure' in PureScript mode almost always means an IO failure, not a syntax problem.",
-            "this is intentional: malformed PureScript should still produce a partial structural skeleton rather than blocking the bundle"
+            "delegates the actual parsing to parseCstFile",
+            "on success, runs extractStructure to build the ChaseFile",
+            "ParseFailure is now a real syntactic-parse failure, not just an IO failure as it was under the previous line-scanner architecture"
           ],
           "consumes": [
             "Chase.Parse.parseSourceFile (the dispatcher invokes this for .purs files)"
           ]
         },
+        "scanTestBindings": {
+          "intent": "Parse a .purs file and return the module name plus one (function name, line, [referenced names]) entry per top-level value binding",
+          "effects": ["IO"],
+          "notes": [
+            "parallel in shape to Chase.Coverage.parseTestFile but lives in Chase.Parse.PureScript because the reference walk is naturally an AST traversal over the CST",
+            "only DeclValue declarations produce entries; signatures, foreigns, datas, classes, instances, derives, fixities, kindsignatures, and roles all return Nothing",
+            "the [referenced names] list is deduplicated via nub and has the binding's own name filtered out (recursion is not a self-test, per decision SelfReferencesFilteredAtExtractionTime)",
+            "exposed in the module's export list and intended for future use by Chase.Pipeline.buildTestIndexOrEmpty when PureScript coverage analysis is enabled; Chase.Pipeline currently filters test roots to .hs files only, so scanTestBindings has no in-tree consumer yet"
+          ]
+        },
+        "parseCstFile": {
+          "intent": "Read the file, lex and parse it via the vendored CST library, return (sourceText, Module) or a ParseFailure",
+          "effects": ["IO"],
+          "notes": [
+            "reads via TIO.readFile inside a SomeException catch; IO failures become ParseFailures with a 'read failed: ' prefixed message",
+            "parses in two stages per decision TwoStageParseViaResFull: PSParser.parseModule on the lexed token stream, then resFull on the partial result to resolve layout",
+            "either stage produces a NonEmpty CSTErr.ParserError on failure; both error lists are formatted identically by renderParserErrors and surfaced as ParseFailure",
+            "no fallback or recovery: a partial parse is discarded if either stage errors out"
+          ],
+          "consumes": [
+            "Chase.Parse.PureScript.parseSourceFile",
+            "Chase.Parse.PureScript.scanTestBindings"
+          ]
+        },
+        "renderParserErrors": [
+          "formats a NonEmpty list of CST ParserErrors as a multi-line Text suitable for inclusion in a ParseFailure message",
+          "delegates per-error formatting to CSTErr.prettyPrintError; chase does not customize the wording",
+          "joins messages with newline plus two-space indent so multi-error output stays readable when chase prints the WARN block"
+        ],
         "extractStructure": [
-          "orchestrates the full pipeline: stripBlockComments, scanBlocks, then per-block dispatch to toSignature/toForeignSig/toDataDecl/toFixity/classMethodSigs",
-          "module name and imports come from the cleaned source via moduleNameFromSource and importsFromSource; both are line-scoped, not block-scoped",
-          "chaseSignatures concatenates top-level signatures (toSignature on DkSignature blocks) with class method signatures (classMethodSigs on DkClass blocks)",
-          "chaseForeignImports comes from DkForeign blocks via toForeignSig",
-          "chaseFixities comes from DkFixity blocks via toFixity",
-          "DkValue blocks are scanned but produce no output; function bodies are dropped as in Haskell mode"
+          "produces a ChaseFile from a parsed CST.Module by computing declRanges once and then running per-field extractors over those ranges",
+          "chaseSignatures is the concatenation of top-level signatures (extractSignature) and class method signatures (extractClassMethods), per decision ClassMethodsAndTopLevelSigsAreFlattened",
+          "chaseForeignImports comes from DeclForeign blocks via extractForeignImport",
+          "chaseDataDecls covers DeclData, DeclType, DeclNewtype, DeclClass, DeclInstanceChain, and DeclDerive via extractDataDecl",
+          "chaseFixities comes from DeclFixity via extractFixity",
+          "constants/invariants/decisions/topologies are left empty; populated later by Chase.Pipeline.attachAnnotations",
+          "chaseTestCoverage stays Nothing; coverage analysis is currently Haskell-only at the pipeline layer (see scanTestBindings note)"
         ],
-        "stripBlockComments": [
-          "replaces characters inside {- -} (including the two-character markers themselves) with single spaces; both line count AND column positions are preserved so subsequent line/column references against the cleaned source remain accurate",
-          "state carries across lines: a comment opened on line N and closed on line N+5 will blank all intervening characters",
-          "nested block comments are NOT supported: the first -} closes regardless of depth (intentional simplification matching the documented contract)",
-          "edge case NOT handled: a {- or -} marker split across a line boundary (e.g. line ending with '{' and the next line starting with '-') will not be detected. Idiomatic PureScript does not place these mid-marker breaks at line edges."
+        "extractTestBindings": [
+          "maps over modDecls with valueBindingRefs and uses mapMaybe to drop non-value declarations silently",
+          "result is one (fnName, startLine, [refs]) tuple per top-level DeclValue"
         ],
-        "isAnchor": [
-          "true iff the line is non-empty AND its first character is not whitespace AND the line does not start with '--', 'module ', or 'import '",
-          "deliberately permissive: any other column-0 non-comment, non-header line is treated as a potential declaration anchor",
-          "classification of WHAT kind of anchor a line is happens later in classifyAnchor"
+        "valueBindingRefs": [
+          "matches only DeclValue; returns Nothing for every other declaration kind",
+          "the function name is extracted from CST.valName via identText; the line is the start line of the name token",
+          "refs are gathered by collectValueBindingRefs, deduplicated via nub, then the binding's own name is filtered out",
+          "this is the layer at which recursion is dropped from coverage analysis; see decision SelfReferencesFilteredAtExtractionTime"
         ],
-        "scanBlocks": [
-          "walks line-numbered source, emits one Block per anchor line",
-          "block end = (next anchor line - 1), or total line count for the last anchor",
-          "blank lines and indented body lines between two anchors belong to the EARLIER block; this matters for class method extraction, where indented method sigs are inside the class block's range"
+        "extractImport": [
+          "returns the dotted module name via N.runModuleName",
+          "appends ' as Alias' when impQual is set; the alias itself is the runModuleName of the qualified name",
+          "explicit name lists (the parenthesized export list of an import) are not present in this output, so Chase.Render.collapseImport in the renderer has nothing to strip from PureScript imports"
         ],
-        "computeEnds": [
-          "pairs each anchor (line, text) with the end line of its block",
-          "the last anchor's end is the total line count of the file",
-          "all other anchors' ends are (next anchor line - 1)"
+        "extractSignature": [
+          "produces a Signature only for DeclSignature; returns Nothing for every other declaration kind",
+          "sigVerbatim is the full source span of the declaration via sliceLines from startL to endL",
+          "sigSrcLine is the start line; sigName is the identifier from the Labeled wrapper"
+        ],
+        "extractClassMethods": [
+          "produces zero or more Signatures from the methods of a DeclClass",
+          "the methods field is Maybe (SourceToken, NonEmpty Method); Nothing means a class declared without a 'where' block (abstract / no methods), and produces []",
+          "each method goes through toMethodSig; the resulting Signatures are flattened into chaseSignatures alongside top-level signatures"
+        ],
+        "toMethodSig": [
+          "extracts the method name and line from the Labeled (Name Ident) Type wrapper",
+          "sigVerbatim is the FIRST line only, stripped of leading whitespace, so the method reads as 'name :: Type' even though it was indented under the class",
+          "multi-line method types lose their continuation lines; see open issue ClassMethodSignaturesAreFirstLineOnly"
+        ],
+        "extractForeignImport": [
+          "handles all three foreign-import forms produced by the CST: ForeignValue, ForeignData, and ForeignKind",
+          "ForeignValue: name is the value identifier via identText",
+          "ForeignData: name is the type ProperName via runProperName",
+          "ForeignKind: name is the kind ProperName via runProperName (rare; PureScript moved to first-class kinds, so this form is mostly legacy)",
+          "sigVerbatim is the full source span; sigSrcLine is the start line"
+        ],
+        "extractDataDecl": [
+          "DeclData, DeclType, DeclNewtype: full source span via sliceLines; name is the dataHdName from the data head as a ProperName",
+          "DeclClass: head-only via sliceFirstLine; name is clsName from the class head",
+          "DeclInstanceChain: head-only; name is the class name from the FIRST instance head's qualName; subsequent 'else instance' clauses are silently dropped (see open issue InstanceChainTailIgnored)",
+          "DeclDerive: head-only; name is the class name from the instance head's qualName",
+          "every other declaration kind returns Nothing"
+        ],
+        "extractFixity": [
+          "produces a Fixity entry for DeclFixity only",
+          "handles both FixityValue (alias for a value-level identifier) and FixityType (alias for a type-level identifier)",
+          "the operator name is extracted via runOpName from the Name wrapper inside FixityOp",
+          "verbatim is the first line only; multi-line fixity declarations are not idiomatic in PureScript",
+          "fixOps always has exactly one element; the previous parser sometimes inferred multiple operator names per fixity block, but the CST gives one operator per DeclFixity by construction"
+        ],
+        "collectValueBindingRefs": [
+          "dispatches on the Guarded constructor of valGuarded: Unconditional walks the Where directly; Guarded walks each GuardedExpr",
+          "produces a duplicated [Text]; deduplication happens at the caller (valueBindingRefs)"
+        ],
+        "collectFromWhere": [
+          "collects refs from the main expression and from every let-binding in the where-clause",
+          "refs from the where-binding bodies are flattened into the same list as the expression refs; chase output does not distinguish body refs from where-clause refs"
+        ],
+        "collectFromGuardedExpr": [
+          "collects refs from each pattern guard's condition expression and from the guard's associated Where",
+          "PatternGuard binders on the LHS of an arrow are not collected (patterns introduce names; they do not reference them)"
+        ],
+        "collectFromPatternGuard": [
+          "returns the refs in the guard's expression; the pattern, if any, is ignored",
+          "matches the Haskell mode behavior in Chase.Coverage.collectVarsIn (constructor patterns are not refs)"
+        ],
+        "collectFromLetBinding": [
+          "LetBindingSignature: returns [] (a type signature on a let binding does not execute)",
+          "LetBindingName: recurses via collectValueBindingRefs on the value binding fields",
+          "LetBindingPattern: walks the where-clause RHS; the pattern itself is ignored"
+        ],
+        "collectFromExpr": [
+          "ExprIdent: emits the qualified name via identText; this is the primary signal that drives test-coverage attribution",
+          "ExprConstructor: returns [] (constructor references are not function-coverage refs)",
+          "ExprOpName: returns [] (see open issue OperatorNamesNotCollectedAsRefs)",
+          "ExprInfix: walks both operands AND the operator sub-expression (which is itself a full Expr); a backtick infix call like 'a `foo` b' contributes foo as a ref",
+          "ExprOp: walks both operands but NOT the operator name (the operator comes through as ExprOpName)",
+          "ExprVisibleTypeApp: drops the type argument; type-level references are not tracked",
+          "ExprLambda: walks the body; lambda parameter patterns are not refs (they introduce names)",
+          "ExprCase: walks every scrutinee in the case head and the RHS of each branch via collectFromGuarded; LHS patterns are not refs",
+          "ExprLet: walks every let-binding and the body expression",
+          "ExprDo and ExprAdo: walk every DoStatement; ExprAdo additionally walks the trailing result expression",
+          "ExprRecordAccessor: walks the underlying expression; the field label is not a ref",
+          "all literal constructors (Boolean, Char, String, Number, Hole, Section) return []"
+        ],
+        "collectFromRecordLabeled": [
+          "RecordPun: emits the punned identifier as a ref, since '{ foo }' is sugar for '{ foo: foo }' and the second 'foo' is a real reference",
+          "RecordField: recurses into the field's expression; the label itself is not a ref"
+        ],
+        "collectFromRecordUpdate": [
+          "RecordUpdateLeaf: walks the new value expression",
+          "RecordUpdateBranch: walks the inner nested updates recursively (e.g. '{ a { b = ... } }')"
+        ],
+        "collectFromGuarded": [
+          "same shape as the top-level Guarded dispatch in collectValueBindingRefs, kept as a separate helper because case branches reuse the Guarded type"
+        ],
+        "collectFromDoStatement": [
+          "DoLet: walks all let-bindings via collectFromLetBinding",
+          "DoDiscard: walks the bare expression-statement",
+          "DoBind: walks the RHS expression only; the LHS pattern is ignored"
+        ],
+        "delimitedToList": [
+          "flattens a Wrapped (Maybe (Separated a)) into a plain list",
+          "empty delimited (e.g. '[]' or '{}') yields []"
+        ],
+        "delimitedNonEmptyToList": [
+          "flattens Wrapped (Separated a) where the inner Separated must have at least one element by construction",
+          "never returns []"
+        ],
+        "sepToList": [
+          "Separated has shape (head, [(separator, element)])",
+          "returns hd : map snd tl; the separator tokens are discarded"
+        ],
+        "declRanges": [
+          "assigns each declaration a (startLine, endLine) pair using the start line of the NEXT declaration minus 1 as the end line",
+          "the last declaration's end is totalLines (the file's full line count)",
+          "max startL (nextStart - 1) guards against the degenerate case of two declarations sharing a start line; the earlier one gets a zero-width range rather than a backwards range"
+        ],
+        "declStartLine": [
+          "extracts the start line of every Declaration constructor variant",
+          "DeclRole and DeclKindSignature are recognized so the range computation doesn't crash; their content produces no chase output (see open issue DeclRoleAndKindSignatureProduceNoOutput)",
+          "the start line comes from the declaration's leading keyword token (data, type, class, instance, derive, kindsignature, foreign, role, infix*); for DeclValue and DeclSignature it comes from the name token instead"
         ],
         "sliceLines": [
           "1-indexed inclusive slice over a [Text]",
-          "tolerates out-of-bounds inputs gracefully because take/drop on lists are total"
+          "tolerates out-of-bounds startL by clamping the offset to max 0 (startL - 1); a negative or zero startL produces output from the file head",
+          "drops trailing blank lines via dropWhile + reverse before joining, so the verbatim block doesn't carry whitespace between adjacent declarations",
+          "intermediate blank lines (between non-blank lines inside the slice) are preserved"
         ],
-        "classifyAnchor": [
-          "matches column-0 line prefix against known keywords to produce a DeclKind",
-          "'else instance ...' is classified as DkInstance via an explicit 'else instance ' prefix check; a bare 'else ' line is NOT recognized as an instance anchor",
-          "anchors that don't match any keyword fall through to hasTopLevelTypeColon: if a '::' appears before any ' = ' in the block, the kind is DkSignature, otherwise DkValue",
-          "DkValue is the catch-all and is silently dropped during emission; bare 'lowerIdent = ...' value bindings produce no chase output"
+        "sliceFirstLine": [
+          "returns ONLY the line at startL (1-indexed); returns the empty Text if startL is past the file length",
+          "used for head-only renderings (class, instance, derive, fixity, class method sig)"
         ],
-        "hasTopLevelTypeColon": [
-          "concatenates the block's lines with single-space separators, then checks whether '::' appears before any ' = '",
-          "the ' = ' check (note the leading and trailing spaces) is meant to avoid matching '=' inside record literals or type-level equality; it can be fooled by signatures that don't use whitespace around '=' on continuation lines",
-          "returns True when a type signature shape is detected, False otherwise"
+        "moduleName": [
+          "extracts the module's namespace name as a dotted-Text via N.runModuleName on modNamespace"
         ],
-        "toSignature": {
-          "notes": [
-            "produces a Signature only for DkSignature blocks",
-            "verbatim text is the full block, trailing blanks trimmed",
-            "name comes from signatureName, which takes the text before '::' on the first line",
-            "an empty name suppresses output (defensive: an oddly-shaped signature block does not pollute the signature list with an empty entry)"
-          ],
-          "consumes": [
-            "Chase.Render.renderSignaturesWithInvariants (PureScript signatures share the renderer with Haskell signatures)"
-          ]
-        },
-        "signatureName": [
-          "takes the substring before '::' on the FIRST line of the verbatim text, then strips whitespace",
-          "multi-line signatures (with the type spanning extra lines) still have their name extracted correctly from the first line"
+        "identText": [
+          "thin alias for CST.getIdent",
+          "exists as a separate helper so the rest of the file uses identText uniformly regardless of how the vendored CST library exposes the conversion"
         ],
-        "trimTrailingBlanks": [
-          "removes trailing blank lines from a multi-line Text",
-          "preserves leading blanks and internal blanks; only the tail is affected",
-          "used to keep block verbatim output tight against the next chase output element"
-        ],
-        "classMethodSigs": [
-          "scans the body of a DkClass block (excluding the head line) for lines containing '::' where the substring before '::' is a single lowercase identifier",
-          "method line numbers preserve the source position via the bodyStartLn offset",
-          "verbatim is the stripped method line ONLY, not any indented continuation; multi-line method signatures inside class bodies will lose their continuation lines (a known limitation that has not bitten in practice on cheeblr)"
-        ],
-        "isLowerIdent": [
-          "true iff the first character is 'a'..'z' or '_'",
-          "does NOT check the rest of the identifier; intended as a cheap discriminator for class method extraction"
-        ],
-        "toForeignSig": [
-          "produces a Signature only for DkForeign blocks",
-          "the resulting Signature lives in chaseForeignImports, not chaseSignatures (see decision ForeignImportsAreSeparateFromSignatures)",
-          "an empty name suppresses output"
-        ],
-        "foreignImportName": [
-          "handles both 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms",
-          "for the data form, returns the type name (after stripping 'data '); for the value form, returns the value name",
-          "name extraction stops at the first space, ':', or newline"
-        ],
-        "toDataDecl": [
-          "DkData, DkNewtype, DkType -> fullBody (entire source span is structural and worth keeping)",
-          "DkClass, DkInstance, DkDerive -> headOnly (only the first line)",
-          "anything else -> [] (no data decl emitted)"
-        ],
-        "fullBody": [
-          "renders the entire block range as verbatim text with trailing blanks trimmed",
-          "name comes from declName based on the block's DeclKind"
-        ],
-        "headOnly": [
-          "renders only the first line of the block",
-          "name comes from declName based on the block's DeclKind"
-        ],
-        "declName": [
-          "dispatches on DeclKind to call the appropriate name-extraction helper",
-          "for DkData/DkNewtype/DkType: takes the word immediately after the keyword, stopping at space, '(', '<', or newline (so 'data Foo a b' yields 'Foo')",
-          "for DkClass/DkInstance/DkDerive: delegates to classHeadName/instanceHeadName/deriveHeadName"
-        ],
-        "classHeadName": [
-          "strips 'class ' prefix, then if there is a '<=' context arrow, takes what comes after the arrow",
-          "returns the first whitespace-delimited token after the context (so 'class Eq a <= Ord a' yields 'Ord')"
-        ],
-        "instanceHeadName": [
-          "strips 'instance ' or 'else instance ' prefix, in that order; classifyAnchor guarantees one of these will match before this function is called",
-          "if a '::' is present (named instance form like 'instance fooBar :: Foo a'), the part BEFORE '::' is the name; otherwise the entire head (with any trailing ' where' stripped) is the name",
-          "anonymous instances like 'instance Show Foo where ...' produce 'Show Foo' as the identifier, since instances do not have a single language-level name"
-        ],
-        "deriveHeadName": [
-          "strips 'derive ', then optionally 'newtype ', then optionally 'instance ' from the prefix in that order",
-          "if a '::' is present (named derive form), takes the part before '::'; otherwise takes the rest as the name",
-          "covers 'derive instance ...', 'derive newtype instance ...', and the named variants of both"
-        ],
-        "stripWhereSuffix": [
-          "drops everything from ' where' onward (note the leading space) to clean instance heads",
-          "if no ' where' is found, returns the input unchanged"
-        ],
-        "toFixity": [
-          "produces a Fixity entry for DkFixity blocks",
-          "verbatim is the FIRST line only; multi-line fixity declarations are not idiomatic in PureScript",
-          "operator names come from fixityOps"
-        ],
-        "fixityOps": [
-          "for 'infixr 6 type Foo as <>': finds 'as' in the word list and returns the token after it (so '<>')",
-          "for the simpler 'infixl 5 someFn as +': same path, returns '+'",
-          "fallback: if no 'as' token is found, returns the LAST whitespace-delimited token; this is best-effort and may need refinement if PureScript fixity syntax grows new forms"
-        ],
-        "moduleNameFromSource": [
-          "scans every line for one starting with 'module ' (after stripStart), takes the first match",
-          "name characters are A-Z, a-z, 0-9, '.', '_', or apostrophe; takeWhile stops at the first non-matching character (so 'module Foo.Bar where' yields 'Foo.Bar')",
-          "returns empty Text if no module header is found (rare; will produce an empty %mod line in output)"
-        ],
-        "importsFromSource": [
-          "any line whose stripStart starts with 'import ' becomes one entry",
-          "qualified imports keep their full form including 'as Alias' and explicit name lists; Chase.Render.collapseImport strips the name list before output"
+        "tokenLine": [
+          "returns the 1-indexed start line of any SourceToken",
+          "peels through tokAnn -> tokRange -> srcStart -> srcLine"
         ]
       }
     },

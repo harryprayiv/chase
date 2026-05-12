@@ -45,7 +45,8 @@ import Chase.Types
 parseHsModule :: FilePath -> IO (Either ParseFailure (Text, HsModule GhcPs))
 parseHsModule path = do
   bytes <- BS.readFile path
-  let sourceText  = TE.decodeUtf8 bytes
+  let rawText     = TE.decodeUtf8 bytes
+      sourceText  = preprocessCpp rawText
       buf         = stringToStringBuffer (T.unpack sourceText)
       dflags      = applySourcePragmas path buf (defaultDynFlags probedSettings)
       pOpts       = initParserOpts dflags
@@ -64,6 +65,48 @@ parseSourceFile path = do
     Left pf -> Left pf
     Right (sourceText, hsmod) ->
       Right $ extractStructure path sourceText (T.lines sourceText) hsmod
+
+
+-- | If the source declares LANGUAGE CPP, replace each line that begins
+-- with '#' (after optional leading whitespace) with an empty line. This:
+--
+--   * keeps every original line number stable, so SrcSpan attribution
+--     in the AST still indexes correctly into the source line list;
+--   * preserves the body of BOTH branches of #if/#else, which is
+--     deliberate: chase produces structural skeletons for LLM context,
+--     and seeing two compat-shim signatures (one per branch) is more
+--     informative than picking one. Examples like Grace.Compat carry
+--     fromAesonMap with two different types, and both deserve to show
+--     up in the chase output.
+--
+-- Limitations (documented; degrade gracefully via the existing parse
+-- failure path):
+--
+--   * #define directives are stripped, not expanded. Code that depends
+--     on a macro substitution in a syntactically-critical position will
+--     fail to parse.
+--   * A CPP conditional that splits one expression across branches
+--     (e.g. a type signature whose argument list is selected by #if)
+--     will produce two non-overlapping fragments and fail to parse.
+--   * Both branches share the same source span, so any later pass that
+--     diffs by line will see both branches as live code.
+--
+-- The alternative is cpphs. We do NOT use it because (a) cabal-style
+-- MIN_VERSION_pkg(...) macros are undefined here and expand to invalid
+-- syntax, and (b) cpphs picks one branch, which throws away exactly
+-- the structural information chase exists to surface.
+preprocessCpp :: Text -> Text
+preprocessCpp src
+  | needsCpp src = T.unlines (map blankIfDirective (T.lines src))
+  | otherwise    = src
+  where
+    blankIfDirective line =
+      case T.uncons (T.stripStart line) of
+        Just ('#', _) -> T.empty
+        _             -> line
+
+needsCpp :: Text -> Bool
+needsCpp src = "CPP" `elem` pragmasFromSource src
 
 
 applySourcePragmas :: FilePath -> StringBuffer -> DynFlags -> DynFlags
