@@ -89,6 +89,8 @@ library vendor-purescript-cst
     Chase.Vendor.PureScript.Comments
     Chase.Vendor.PureScript.CST.Print
     Chase.Vendor.PureScript.CST.Traversals
+    Chase.Vendor.Data.Text.PureScript
+    Chase.Vendor.PureScript.CST.Traversals.Type
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
@@ -141,6 +143,7 @@ library
     , ghc-lib-parser
     , syb
     , text
+    , time
     , vendor-purescript-cst
 
 -- ------------------------------------------------------------------
@@ -156,3 +159,7 @@ executable chase
     , base
     , chase
     , text
+    , containers
+    , directory
+    , filepath
+    , optparse-applicative
