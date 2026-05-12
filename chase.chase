@@ -1,5 +1,5 @@
 %bundle chase v1
-%generated 2026-05-11T21:50:01Z
+%generated 2026-05-12T15:33:08Z
 %roots /home/bismuth/git/chase/src
 %files 9 ok, 0 failed
 
@@ -146,6 +146,7 @@ parseTopology :: A.Value -> AT.Parser Topology
 %uses Data.Map.Strict
 %uses qualified Data.Text as T
 %uses Data.Text
+%uses System.FilePath
 %uses GHC.Hs
 %uses GHC.Hs.Decls
 %uses GHC.Hs.Binds
@@ -156,6 +157,7 @@ parseTopology :: A.Value -> AT.Parser Topology
 %uses GHC.Types.Name.Occurrence
 %uses Chase.Types
 %uses qualified Chase.Parse.Haskell as HSP
+%uses qualified Chase.Parse.PureScript as PSP
 
 data TestBinding = TestBinding
   { tbModule   :: Text
@@ -174,6 +176,10 @@ parseTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
   ! ParseFailure is returned as Left; the pipeline prints a warning and skips the file
   ! module name comes from Chase.Parse.Haskell.moduleNameOf; '' for files without a module header
   > consumed by: Chase.Pipeline.buildTestIndexOrEmpty (called once per test file when cfgTestRoots is non-empty)
+
+parseHaskellTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
+
+parsePureScriptTestFile :: FilePath -> IO (Either ParseFailure [TestBinding])
 
 scanTestFile :: Text -> HsModule GhcPs -> [TestBinding]
   ! pure: takes an already-parsed HsModule and returns one TestBinding per top-level FunBind
@@ -422,33 +428,22 @@ probedToolSettings :: Settings.ToolSettings
 %file /home/bismuth/git/chase/src/Chase/Parse/PureScript.hs
 %mod Chase.Parse.PureScript
 
-%ext LambdaCase, OverloadedStrings
+%ext LambdaCase, OverloadedStrings, ScopedTypeVariables
 
 %uses qualified Data.Text as T
 %uses Data.Text
 %uses qualified Data.Text.IO as TIO
 %uses Control.Exception
+%uses Data.List
+%uses qualified Data.List.NonEmpty as NE
+%uses Data.List.NonEmpty
+%uses Data.Maybe
+%uses qualified Chase.Vendor.PureScript.CST.Lexer as PSLexer
+%uses qualified Chase.Vendor.PureScript.CST.Parser as PSParser
+%uses qualified Chase.Vendor.PureScript.CST.Types as CST
+%uses qualified Chase.Vendor.PureScript.CST.Errors as CSTErr
+%uses qualified Chase.Vendor.PureScript.Names as N
 %uses Chase.Types
-
-data DeclKind
-  = DkData
-  | DkNewtype
-  | DkType
-  | DkClass
-  | DkInstance      -- includes "else instance"
-  | DkDerive
-  | DkForeign
-  | DkFixity
-  | DkSignature
-  | DkValue         -- skipped during emission
-  deriving (Show, Eq)
-
-data Block = Block
-  { blkKind      :: DeclKind
-  , blkStartLine :: Int          -- 1-indexed
-  , blkEndLine   :: Int          -- 1-indexed, inclusive
-  }
-  deriving (Show)
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
   ! intent: Read a .purs file as text, run the heuristic structure extractor, return either a ChaseFile or a ParseFailure
@@ -458,7 +453,16 @@ parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
   ! this is intentional: malformed PureScript should still produce a partial structural skeleton rather than blocking the bundle
   > consumed by: Chase.Parse.parseSourceFile (the dispatcher invokes this for .purs files)
 
-extractStructure :: FilePath -> Text -> ChaseFile
+scanTestBindings
+  :: FilePath
+  -> IO (Either ParseFailure (Text, [(Text, Int, [Text])]))
+
+parseCstFile
+  :: FilePath -> IO (Either ParseFailure (Text, CST.Module ()))
+
+renderParserErrors :: NonEmpty CSTErr.ParserError -> Text
+
+extractStructure :: FilePath -> Text -> CST.Module () -> ChaseFile
   ! orchestrates the full pipeline: stripBlockComments, scanBlocks, then per-block dispatch to toSignature/toForeignSig/toDataDecl/toFixity/classMethodSigs
   ! module name and imports come from the cleaned source via moduleNameFromSource and importsFromSource; both are line-scoped, not block-scoped
   ! chaseSignatures concatenates top-level signatures (toSignature on DkSignature blocks) with class method signatures (classMethodSigs on DkClass blocks)
@@ -466,131 +470,76 @@ extractStructure :: FilePath -> Text -> ChaseFile
   ! chaseFixities comes from DkFixity blocks via toFixity
   ! DkValue blocks are scanned but produce no output; function bodies are dropped as in Haskell mode
 
-stripBlockComments :: [Text] -> [Text]
-  ! replaces characters inside {- -} (including the two-character markers themselves) with single spaces; both line count AND column positions are preserved so subsequent line/column references against the cleaned source remain accurate
-  ! state carries across lines: a comment opened on line N and closed on line N+5 will blank all intervening characters
-  ! nested block comments are NOT supported: the first -} closes regardless of depth (intentional simplification matching the documented contract)
-  ! edge case NOT handled: a {- or -} marker split across a line boundary (e.g. line ending with '{' and the next line starting with '-') will not be detected. Idiomatic PureScript does not place these mid-marker breaks at line edges.
+extractTestBindings :: CST.Module () -> [(Text, Int, [Text])]
 
-isAnchor :: Text -> Bool
-  ! true iff the line is non-empty AND its first character is not whitespace AND the line does not start with '--', 'module ', or 'import '
-  ! deliberately permissive: any other column-0 non-comment, non-header line is treated as a potential declaration anchor
-  ! classification of WHAT kind of anchor a line is happens later in classifyAnchor
+valueBindingRefs :: CST.Declaration () -> Maybe (Text, Int, [Text])
 
-scanBlocks :: [Text] -> [Block]
-  ! walks line-numbered source, emits one Block per anchor line
-  ! block end = (next anchor line - 1), or total line count for the last anchor
-  ! blank lines and indented body lines between two anchors belong to the EARLIER block; this matters for class method extraction, where indented method sigs are inside the class block's range
+extractImport :: CST.ImportDecl () -> Text
 
-computeEnds :: Int -> [(Int, Text)] -> [((Int, Text), Int)]
-  ! pairs each anchor (line, text) with the end line of its block
-  ! the last anchor's end is the total line count of the file
-  ! all other anchors' ends are (next anchor line - 1)
+extractSignature
+  :: [Text] -> (CST.Declaration (), Int, Int) -> Maybe Signature
 
-sliceLines :: [Text] -> Int -> Int -> [Text]
+extractClassMethods
+  :: [Text] -> (CST.Declaration (), Int, Int) -> [Signature]
+
+toMethodSig
+  :: [Text]
+  -> CST.Labeled (CST.Name CST.Ident) (CST.Type ())
+  -> Signature
+
+extractForeignImport
+  :: [Text] -> (CST.Declaration (), Int, Int) -> Maybe Signature
+
+extractDataDecl
+  :: [Text] -> (CST.Declaration (), Int, Int) -> Maybe ChaseDataDecl
+
+extractFixity
+  :: [Text] -> (CST.Declaration (), Int, Int) -> Maybe Fixity
+
+collectValueBindingRefs :: CST.ValueBindingFields () -> [Text]
+
+collectFromWhere :: CST.Where () -> [Text]
+
+collectFromGuardedExpr :: CST.GuardedExpr () -> [Text]
+
+collectFromPatternGuard :: CST.PatternGuard () -> [Text]
+
+collectFromLetBinding :: CST.LetBinding () -> [Text]
+
+collectFromExpr :: CST.Expr () -> [Text]
+
+collectFromRecordLabeled :: CST.RecordLabeled (CST.Expr ()) -> [Text]
+
+collectFromRecordUpdate :: CST.RecordUpdate () -> [Text]
+
+collectFromGuarded :: CST.Guarded () -> [Text]
+
+collectFromDoStatement :: CST.DoStatement () -> [Text]
+
+delimitedToList :: CST.Delimited a -> [a]
+
+delimitedNonEmptyToList :: CST.DelimitedNonEmpty a -> [a]
+
+sepToList :: CST.Separated a -> [a]
+
+declRanges
+  :: [CST.Declaration ()]
+  -> Int
+  -> [(CST.Declaration (), Int, Int)]
+
+declStartLine :: CST.Declaration () -> Int
+
+sliceLines :: [Text] -> Int -> Int -> Text
   ! 1-indexed inclusive slice over a [Text]
   ! tolerates out-of-bounds inputs gracefully because take/drop on lists are total
 
-classifyAnchor :: [Text] -> Text -> DeclKind
-  ! matches column-0 line prefix against known keywords to produce a DeclKind
-  ! 'else instance ...' is classified as DkInstance via an explicit 'else instance ' prefix check; a bare 'else ' line is NOT recognized as an instance anchor
-  ! anchors that don't match any keyword fall through to hasTopLevelTypeColon: if a '::' appears before any ' = ' in the block, the kind is DkSignature, otherwise DkValue
-  ! DkValue is the catch-all and is silently dropped during emission; bare 'lowerIdent = ...' value bindings produce no chase output
+sliceFirstLine :: [Text] -> Int -> Text
 
-hasTopLevelTypeColon :: [Text] -> Bool
-  ! concatenates the block's lines with single-space separators, then checks whether '::' appears before any ' = '
-  ! the ' = ' check (note the leading and trailing spaces) is meant to avoid matching '=' inside record literals or type-level equality; it can be fooled by signatures that don't use whitespace around '=' on continuation lines
-  ! returns True when a type signature shape is detected, False otherwise
+moduleName :: CST.Module a -> Text
 
-toSignature :: [Text] -> Block -> [Signature]
-  ! produces a Signature only for DkSignature blocks
-  ! verbatim text is the full block, trailing blanks trimmed
-  ! name comes from signatureName, which takes the text before '::' on the first line
-  ! an empty name suppresses output (defensive: an oddly-shaped signature block does not pollute the signature list with an empty entry)
-  > consumed by: Chase.Render.renderSignaturesWithInvariants (PureScript signatures share the renderer with Haskell signatures)
+identText :: CST.Ident -> Text
 
-signatureName :: Text -> Text
-  ! takes the substring before '::' on the FIRST line of the verbatim text, then strips whitespace
-  ! multi-line signatures (with the type spanning extra lines) still have their name extracted correctly from the first line
-
-trimTrailingBlanks :: Text -> Text
-  ! removes trailing blank lines from a multi-line Text
-  ! preserves leading blanks and internal blanks; only the tail is affected
-  ! used to keep block verbatim output tight against the next chase output element
-
-classMethodSigs :: [Text] -> Block -> [Signature]
-  ! scans the body of a DkClass block (excluding the head line) for lines containing '::' where the substring before '::' is a single lowercase identifier
-  ! method line numbers preserve the source position via the bodyStartLn offset
-  ! verbatim is the stripped method line ONLY, not any indented continuation; multi-line method signatures inside class bodies will lose their continuation lines (a known limitation that has not bitten in practice on cheeblr)
-
-isLowerIdent :: Text -> Bool
-  ! true iff the first character is 'a'..'z' or '_'
-  ! does NOT check the rest of the identifier; intended as a cheap discriminator for class method extraction
-
-toForeignSig :: [Text] -> Block -> [Signature]
-  ! produces a Signature only for DkForeign blocks
-  ! the resulting Signature lives in chaseForeignImports, not chaseSignatures (see decision ForeignImportsAreSeparateFromSignatures)
-  ! an empty name suppresses output
-
-foreignImportName :: Text -> Text
-  ! handles both 'foreign import name :: Ty' and 'foreign import data Name :: Kind' forms
-  ! for the data form, returns the type name (after stripping 'data '); for the value form, returns the value name
-  ! name extraction stops at the first space, ':', or newline
-
-toDataDecl :: [Text] -> Block -> [ChaseDataDecl]
-  ! DkData, DkNewtype, DkType -> fullBody (entire source span is structural and worth keeping)
-  ! DkClass, DkInstance, DkDerive -> headOnly (only the first line)
-  ! anything else -> [] (no data decl emitted)
-
-fullBody :: [Text] -> Block -> ChaseDataDecl
-  ! renders the entire block range as verbatim text with trailing blanks trimmed
-  ! name comes from declName based on the block's DeclKind
-
-headOnly :: [Text] -> Block -> ChaseDataDecl
-  ! renders only the first line of the block
-  ! name comes from declName based on the block's DeclKind
-
-declName :: DeclKind -> Text -> Text
-  ! dispatches on DeclKind to call the appropriate name-extraction helper
-  ! for DkData/DkNewtype/DkType: takes the word immediately after the keyword, stopping at space, '(', '<', or newline (so 'data Foo a b' yields 'Foo')
-  ! for DkClass/DkInstance/DkDerive: delegates to classHeadName/instanceHeadName/deriveHeadName
-
-classHeadName :: Text -> Text
-  ! strips 'class ' prefix, then if there is a '<=' context arrow, takes what comes after the arrow
-  ! returns the first whitespace-delimited token after the context (so 'class Eq a <= Ord a' yields 'Ord')
-
-instanceHeadName :: Text -> Text
-  ! strips 'instance ' or 'else instance ' prefix, in that order; classifyAnchor guarantees one of these will match before this function is called
-  ! if a '::' is present (named instance form like 'instance fooBar :: Foo a'), the part BEFORE '::' is the name; otherwise the entire head (with any trailing ' where' stripped) is the name
-  ! anonymous instances like 'instance Show Foo where ...' produce 'Show Foo' as the identifier, since instances do not have a single language-level name
-
-deriveHeadName :: Text -> Text
-  ! strips 'derive ', then optionally 'newtype ', then optionally 'instance ' from the prefix in that order
-  ! if a '::' is present (named derive form), takes the part before '::'; otherwise takes the rest as the name
-  ! covers 'derive instance ...', 'derive newtype instance ...', and the named variants of both
-
-stripWhereSuffix :: Text -> Text
-  ! drops everything from ' where' onward (note the leading space) to clean instance heads
-  ! if no ' where' is found, returns the input unchanged
-
-toFixity :: [Text] -> Block -> [Fixity]
-  ! produces a Fixity entry for DkFixity blocks
-  ! verbatim is the FIRST line only; multi-line fixity declarations are not idiomatic in PureScript
-  ! operator names come from fixityOps
-
-fixityOps :: Text -> [Text]
-  ! for 'infixr 6 type Foo as <>': finds 'as' in the word list and returns the token after it (so '<>')
-  ! for the simpler 'infixl 5 someFn as +': same path, returns '+'
-  ! fallback: if no 'as' token is found, returns the LAST whitespace-delimited token; this is best-effort and may need refinement if PureScript fixity syntax grows new forms
-
-moduleNameFromSource :: [Text] -> Text
-  ! scans every line for one starting with 'module ' (after stripStart), takes the first match
-  ! name characters are A-Z, a-z, 0-9, '.', '_', or apostrophe; takeWhile stops at the first non-matching character (so 'module Foo.Bar where' yields 'Foo.Bar')
-  ! returns empty Text if no module header is found (rare; will produce an empty %mod line in output)
-
-importsFromSource :: [Text] -> [Text]
-  ! any line whose stripStart starts with 'import ' becomes one entry
-  ! qualified imports keep their full form including 'as Alias' and explicit name lists; Chase.Render.collapseImport strips the name list before output
+tokenLine :: CST.SourceToken -> Int
 
 %decision LineBasedScannerNotAst
   what:    PureScript is parsed by a column-0 anchor scanner over raw text, not by an AST library
@@ -621,7 +570,6 @@ importsFromSource :: [Text] -> [Text]
 %ext OverloadedStrings
 
 %uses qualified Data.Text as T
-%uses Data.Text
 %uses System.FilePath
 %uses Chase.Types
 %uses qualified Chase.Parse.Haskell as HS
