@@ -13,10 +13,11 @@ you left out. Both fail in different ways.
 and emits a compressed representation that preserves the things an LLM
 cannot reconstruct from a type signature (architectural decisions,
 behavioral invariants, state machine topologies, magic constants, downstream
-dependents, known problems) while dropping the things it can (function
-bodies, import name lists, boilerplate). The result is a single text file
-you paste into a fresh conversation that gives the model substantially more
-useful context per token than either source or hand-written summaries.
+dependents, known problems, test coverage gaps) while dropping the things
+it can (function bodies, import name lists, boilerplate). The result is a
+single text file you paste into a fresh conversation that gives the model
+substantially more useful context per token than either source or
+hand-written summaries.
 
 The name comes from "cut to the chase": skip the preamble, get to what
 actually matters.
@@ -43,16 +44,22 @@ library):
 - instance declarations (head only; bodies are method definitions, which
   chase deliberately drops)
 
-**PureScript (`.purs`)** via a line-based heuristic scanner:
+**PureScript (`.purs`)** via the actual PureScript CST parser, vendored
+from the upstream `purescript` compiler and built against GHC 9.10:
 
 - module name and import declarations
 - fixity declarations (`infixl`, `infixr`, `infix`)
-- type signatures, both top-level and class methods
-- foreign import declarations (kept as a separate section in the output,
-  see below)
+- type signatures, both top-level and class methods (with class methods
+  flattened into the top-level signature stream so invariants attach by
+  name without needing to know whether the binding is free-standing or
+  inside a class body)
+- foreign import declarations (kept as a separate `%foreign` section in
+  the output, see below)
 - `data`, `newtype`, and `type` declarations (verbatim)
-- `class` declarations (head only)
-- `instance`, `else instance`, and `derive` declarations (head only)
+- `class` declarations (head only; method signatures are extracted
+  separately, same convention as Haskell)
+- `instance`, `else instance`, and `derive` declarations (head only,
+  consistent with Haskell)
 - value bindings without a preceding signature are dropped (consistent
   with Haskell mode dropping function bodies)
 
@@ -79,6 +86,12 @@ For modules with annotations, `chase` also attaches:
   `affects` targets, distinct from settled decisions
 - `%topology` blocks for state machines (intended for crem state machines
   but works for anything with a fixed transition graph)
+
+When test roots are configured (or auto-detected), `chase` also attaches:
+
+- `?` test-coverage lines under each signature, foreign import, and
+  pattern synonym, identifying which test functions reference the name
+  (or stating "no test references" when nothing does)
 
 Annotations live in a single JSON file alongside your `.cabal` (or
 `spago.dhall`/`spago.yaml`) file. They are not stored in source comments.
@@ -118,28 +131,50 @@ glance which backend produced which block.
 
 ## Usage
 
-The bare runner produces structure-only output if no annotations are
-found. The source root can contain `.hs`, `.purs`, or both, in any
-directory layout:
+The CLI takes one positional argument (the source path) and a small set
+of flags. Everything else has a sensible default.
 
-    cabal run chase -- backend/src cheeblr.chase
-    cabal run chase -- backend/src chase-output/
-    cabal run chase -- frontend/src cheeblr-frontend.chase
+```
+chase SOURCE [-o PATH] [-a FILE | --no-annotations]
+             [-t DIR[,DIR..] | --no-tests] [-q]
+```
 
-You can point it at a project root containing both, and the bundle will
-include all of them in alphabetical order, dispatched per-file by
-extension:
+The bare invocation auto-detects everything:
 
-    cabal run chase -- . cheeblr-full.chase
+    cabal run chase -- backend/src
 
-If a file named `chase-annotations.json` exists in the current working
-directory, it is loaded automatically and merged into the output. To use
-a file at a different path, pass it as a third positional argument:
+This scans `backend/src` for `.hs` and `.purs` files, writes a bundle to
+`./backend.chase` in the current directory, picks up a
+`chase-annotation.json` or `chase-annotations.json` if one exists in the
+CWD or alongside the source, and auto-detects test directories named
+`test/`, `tests/`, or `spec/` adjacent to the source root. If
+auto-detection finds nothing, those features stay off silently.
 
-    cabal run chase -- backend/src cheeblr.chase ./annotations/cheeblr.json
+Explicit forms:
 
-The default-path being missing is silent (annotations are simply empty).
-An explicit path being missing is a hard error.
+    cabal run chase -- backend/src -o cheeblr.chase
+    cabal run chase -- backend/src -o chase-output/
+    cabal run chase -- backend/src -o cheeblr.chase -a ./annotations/cheeblr.json
+    cabal run chase -- backend/src -o cheeblr.chase -t test,integration-test
+    cabal run chase -- backend/src --no-tests --no-annotations
+    cabal run chase -- backend/src -q
+
+The `-o` value's suffix selects the mode: `.chase` produces a bundle
+file; anything else is treated as a per-file output directory. Default
+is `<source-basename>.chase` in the current directory.
+
+The `-t` flag takes a comma-separated list of directories, not multiple
+`-t` flags. Test root paths are validated; missing directories trigger a
+warning to stderr but do not abort the run.
+
+The `-a` flag points at one annotations file. If the explicit path is
+missing, the run aborts with a hard error (distinct from auto-detect,
+which is silent when no file is found). `--no-annotations` skips
+auto-detection entirely.
+
+`-q` / `--quiet` suppresses the per-file `parse`, `write`, `scan`, and
+`index` progress lines. Drift warnings and parse failures are still
+printed regardless.
 
 ## Annotation file format
 
@@ -309,6 +344,122 @@ patterns, same as a decision's affects.
 If a thing is fixed, delete the open issue. The annotation file is not
 an archive.
 
+## Test coverage analysis
+
+When invoked with test roots (passed explicitly via `-t` or
+auto-detected from `test/`, `tests/`, `spec/` adjacent to the source),
+`chase` produces an additional `?` line under every signature, foreign
+import, and pattern synonym in the output. The line says one of two
+things:
+
+    foo :: Int -> Int
+      ? tested by: ModuleA.testFoo, ModuleB.regressionFoo
+
+    bar :: Int -> Int
+      ? no test references
+
+The purpose is to surface obvious coverage gaps cheaply. A function with
+no test references is almost certainly not tested. A function with a
+long list of references is at least exercised by a lot of test code.
+What it doesn't tell you, deliberately, is whether the tests that
+reference a function actually verify its behavior in any rigorous sense.
+See the limitations below.
+
+### How it works
+
+Coverage is computed by parsing every `.hs` and `.purs` file under your
+test roots, finding each top-level value binding (Haskell `FunBind`,
+PureScript `DeclValue`), and collecting every unqualified identifier
+that appears in its body. The result is an inverted index mapping
+referenced name to the list of test functions that mention it. That
+index is then attached to every source-side `ChaseFile` during the
+pipeline pass: for each signature, foreign import, and pattern synonym,
+the renderer looks up the name and emits the matching test references.
+
+The walk is static. No tests are executed. No HPC instrumentation. No
+build system involvement beyond having `cabal build` succeed once so the
+test source compiles.
+
+The reference-collection mechanism differs by language but produces the
+same `[Text]` shape: Haskell test bodies are walked via SYB's
+`everything` over the GHC AST, picking up every `HsVar` in expression
+position; PureScript test bodies are walked by a hand-rolled traversal
+over the CST (`collectFromExpr`, `collectFromDoStatement`,
+`collectFromWhere`, etc.) with explicit cases for every `CST.Expr`
+constructor. SYB would have been the cheaper choice on the PureScript
+side too, but the vendored PureScript CST types do not all derive
+`Data`, so an explicit walker was the path of least resistance. The
+trade-off is concrete: any new `CST.Expr` constructor introduced
+upstream and pulled in via a vendor refresh has to be added to the
+walker manually, or refs inside it will be silently missed. SYB on the
+Haskell side picks up new constructors automatically.
+
+### What gets recorded as a test
+
+Only top-level value bindings in test files are recorded as test
+bindings. PatBindings like `(setup, teardown) = ...` and nested
+let-bindings inside test bodies are not recorded as separate "tests."
+This is deliberate: a test is overwhelmingly written as `testFooHandlesX
+= ...` (Haskell) or `testFoo = ...` (PureScript), both of which are
+top-level value bindings. PatBindings produce values, and tying coverage
+attribution to one of `setup` or `teardown` is arbitrary. Their RHS
+references are still picked up indirectly: if any FunBind body
+transitively touches a PatBind-bound value's RHS via the collector's AST
+walk, those names contribute. The PatBind itself just doesn't show up
+as a `> tested by:` source.
+
+### What gets recorded as a reference
+
+Anything that ends up as an identifier in expression position inside a
+test function's body. That covers ordinary function applications,
+higher-order arguments to combinators, references inside `do` blocks,
+references inside `let` and `where`, references inside record
+construction or update, and references inside list, tuple, or array
+literals.
+
+It does NOT cover:
+
+- function references introduced by Template Haskell splices (chase
+  does not run splices; whatever the splice would have produced is not
+  walked)
+- references hidden behind generic dispatch (e.g. a `Generic`-derived
+  call whose actual target is decided by an instance the parser cannot
+  resolve)
+- references that only appear at the type level (rare for tests but
+  real)
+- references accessed exclusively through a record selector or a type
+  class method where the underlying implementation name is never
+  lexically present in the test source
+
+These are inherent limits of static analysis without name resolution.
+The output is a smell test ("zero references = almost certainly
+untested"), not a guarantee.
+
+### Self-references are filtered
+
+A recursive helper inside a test file like `go n = if n <= 0 then []
+else n : go (n - 1)` would otherwise appear in its own coverage list:
+`go tested by: TestModule.go`. The indexer drops self-references during
+attribution. A real production function with the same name as a test
+binding still appears in the coverage list if any OTHER test binding
+references it; only the self-loop is filtered.
+
+### When to use coverage analysis
+
+- Before a refactor of a module you're not sure is well-covered. Run
+  coverage and look for the `? no test references` lines on the
+  functions you're about to touch. Those are the ones where you'll find
+  out the hard way.
+- As a sanity check after adding new code to make sure you actually
+  wrote tests for it.
+- When triaging an unfamiliar codebase, as a fast way to identify
+  abandoned-looking parts of the API.
+
+What it is not: a replacement for HPC, mutation testing, or any actual
+test-quality tool. A function appearing in five test files might still
+be exercising only one branch. The `?` line tells you something is
+referencing it. That's the entire contract.
+
 ## Recommended workflow
 
 1. Run the bare extractor first. Read the `.chase` output as if you'd
@@ -326,10 +477,20 @@ an archive.
 5. When you find a problem mid-development that you can't fix
    immediately, add an `openIssue` instead of a TODO comment in source.
    The next LLM session will see it; future you will too.
-6. Repeat for the next priority module.
+6. Once annotations on a module are stable, run the extractor with test
+   coverage enabled (auto-detected if your tests live under `test/`,
+   `tests/`, or `spec/` next to the source; or pass `-t` explicitly).
+   The `? no test references` lines are your "obviously untested" list.
+   Either write a test or add an `openIssue` explaining why it's
+   intentional.
+7. Repeat for the next priority module.
 
 Do not annotate everything before testing. The format and the kinds of
 invariants worth recording will both shift after the first real test.
+Do not turn on coverage analysis before you have annotations either:
+coverage tells you what's untested, but on a fresh codebase the bigger
+problem is that the LLM doesn't yet have enough behavioral context to
+read the existing tests usefully.
 
 ## Parser notes
 
@@ -340,7 +501,7 @@ the per-language work happens in `Chase.Parse.Haskell` and
 
 ### Haskell
 
-The Haskell parser is `ghc-lib-parser`, a snapshot of GHC's own frontend
+The Haskell parser is `ghc-lib-parser`, a snapshot of GHC's own parser
 exposed as a library. This means chase parses any syntax GHC parses:
 GADT-style data declarations with inline kind signatures,
 `effectful`-style `data X :: Effect where`, modern type and data
@@ -387,45 +548,82 @@ bundle. Failures are counted in the bundle preamble.
 
 ### PureScript
 
-The PureScript parser is a line-based heuristic scanner. There is no
-maintained PureScript parser library in Haskell-land that doesn't drag
-the entire purs compiler in as a dependency, so an AST approach would
-couple chase to whichever version of the purs compiler is buildable on
-your system. The line-based approach exploits PureScript's strict
-indentation rule: top-level declarations always start in column 0. An
-"anchor" is a column-0 line that matches a declaration prefix (`data`,
-`newtype`, `type`, `class`, `instance`, `else instance`, `derive`,
-`foreign`, `infixl`/`infixr`/`infix`, or a lowercase identifier
-followed by `::`). A "block" is the run of lines from one anchor up to
-the line before the next anchor.
+The PureScript parser is the actual PureScript CST parser, vendored
+from the upstream `purescript` compiler (currently pinned at v0.15.16
+in the flake). At build time, the `vendor-purescript-cst` flake app
+copies the relevant subset of `purescript/src/Language/PureScript/CST`
+(plus its few non-CST dependencies: `Names`, `PSString`, `Roles`,
+`Comments`, `AST.SourcePos`, `Control.Monad.Supply`,
+`Data.Text.PureScript`) into `vendor/purescript-cst/` under a renamed
+module prefix `Chase.Vendor.PureScript.*`. The chase cabal file
+includes that vendor directory in `hs-source-dirs`, and the parser is
+then a regular dependency-free in-tree module under GHC 9.10.
 
-Multi-line `{- -}` block comments are blanked out (replaced with
-spaces, including the markers themselves) before line scanning runs,
-so commented-out declarations don't fragment real blocks. Both line
-count and column positions are preserved across the blanking, which
-keeps any subsequent line or column references against the cleaned
-source consistent with the original file. Nested block comments are
-not supported: the first `-}` closes regardless of depth. This matches
-the most common PureScript practice and keeps the stripper a
-single-pass scan. One known edge case: a `{-` or `-}` marker split
-across a line boundary (line ending with `{`, next line starting with
-`-`) will not be detected. Idiomatic PureScript does not place these
-mid-marker breaks at line edges.
+This is a deliberate departure from the previous strategy. The earlier
+version used a line-based column-0 anchor scanner over raw `.purs`
+text, because no standalone PureScript parser was published on
+Hackage and pulling the whole purs compiler in as a build dependency
+was a non-starter. That scanner worked on idiomatic, `purs-tidy`
+formatted PureScript and broke on anything that violated the column-0
+assumption (CPP preprocessing, unusual formatters, literate-style
+sources). The vendored CST parser does not have any of those
+constraints: it's the same parser the official compiler uses, so it
+accepts exactly what `purs build` accepts.
 
-The tradeoff of a line-based scanner is brittleness to anything that
-breaks the column-0 assumption: CPP-style preprocessing, unusual
-formatting tools that re-indent top-level decls, or sources that mix
-literate-style narrative with code. On normal idiomatic PureScript
-(spago-style modules, code formatted by `purs-tidy`), the scanner
-handles all the constructs in the production cheeblr frontend
-including foreign imports, `derive` clauses, `else instance` chains,
-and operator fixity declarations.
+Mechanically:
 
-PureScript "parse failures" almost always mean IO failures (missing
-file, permission, decode error), not syntax problems: the scanner is
-deliberately tolerant and will produce a partial structural skeleton
-even when the source has malformed individual declarations, rather
-than blocking the entire bundle.
+- `parseCstFile` reads the file as `Text`, lexes via
+  `Chase.Vendor.PureScript.CST.Lexer`, runs the parser via
+  `Chase.Vendor.PureScript.CST.Parser`, and returns either a
+  `CST.Module ()` or a `NonEmpty CSTErr.ParserError`.
+- `extractStructure` consumes the parsed `CST.Module ()` and walks
+  `CST.Declaration ()` constructors directly: `DeclSignature`,
+  `DeclValue`, `DeclData`, `DeclNewtype`, `DeclType`, `DeclClass`,
+  `DeclInstanceChain`, `DeclDerive`, `DeclFixity`, `DeclForeign`. There
+  is no string scanning of the source body; the verbatim text rendered
+  in the output is sliced from the raw source by the start and end
+  source spans computed from token positions on each declaration.
+- Class method signatures are extracted from `CST.Class` bodies as
+  `CST.Labeled (Name Ident) (Type ())` entries, then flattened into
+  the top-level signature stream so annotations attach by name without
+  needing to distinguish where the signature came from. This matches
+  the Haskell side's convention.
+- Foreign imports are extracted into a separate `chaseForeignImports`
+  field on `ChaseFile` and rendered in their own `%foreign` section.
+  `ForeignValue`, `ForeignData`, and `ForeignKind` forms are all
+  handled.
+- `DeclInstanceChain` and `DeclDerive` render only the head line of
+  their source span, never the body, consistent with the Haskell
+  convention for instances.
+- Parse errors come back as structured `CSTErr.ParserError` values
+  with source positions, formatted by `renderParserErrors` into the
+  same `ParseFailure` shape used by the Haskell side. A `.purs` file
+  that fails to parse is reported with the actual CST error message
+  and source location, not a "we couldn't figure out what this line
+  is" guess.
+
+The vendor step is run separately from `cabal build`:
+
+    nix run .#vendor-purescript-cst
+
+This is a one-time operation that populates `vendor/purescript-cst/`.
+If the directory already exists, the app removes and recreates it (the
+nix store path is content-addressed, so any change to the upstream
+purescript pin produces a fresh output directory). After running it,
+`cabal build` works normally.
+
+The vendoring strategy was chosen over a Hackage-style published parser
+package because the PureScript compiler's CST module is not currently
+packaged for standalone use, and waiting for upstream to ship it as one
+would have left chase blocked indefinitely. Renaming the modules under
+`Chase.Vendor.*` keeps them namespaced and prevents any collision if a
+downstream consumer of chase has its own dependency on something from
+the PureScript ecosystem.
+
+If a `.purs` file fails to parse, chase reports the CST parser's
+diagnostics with source position and continues with the rest of the
+bundle. Failures are counted in the bundle preamble, alongside Haskell
+failures.
 
 ## Limitations to know about
 
@@ -473,11 +671,36 @@ inspected. The chase output records that a function is a foreign
 import and its PureScript-side type, but says nothing about what the
 JS implementation does. Annotate it if the FFI contract matters.
 
-The PureScript line-based scanner does not handle CPP-style
-preprocessing in `.purs` files. PureScript doesn't ship CPP and almost
-no PureScript code uses it, but if your codebase does, the scanner
-will read pre-processed text as source and may produce nonsense
-boundaries.
+Test coverage is matched by unqualified name only, across both
+languages. A test that calls `Chase.Parse.parseSourceFile` and a test
+that calls `Chase.Parse.Haskell.parseSourceFile` both produce a
+`TestRef` keyed by `parseSourceFile`, so when chase renders, both
+functions get the same `? tested by:` list. One is accurate, the
+other is a false positive. The same collision happens across the
+language boundary: a Haskell `runChase` and a PureScript `runChase`
+share the index. The fix is to extract qualifiers from `Qual`
+`RdrName`s on the Haskell side and from `CST.QualifiedName` on the
+PureScript side, then match the qualifier prefix against the source
+module name during attachment. That requires plumbing the source
+module name through `attachCoverage`. Until then, coverage on
+projects with naming collisions is a smell test only, not
+authoritative.
+
+Test coverage is also blind to higher-order indirection it cannot see
+lexically: refs going through Template Haskell splice output, refs
+hidden behind generic dispatch, refs accessed exclusively through a
+record selector or class method where the underlying function name
+never lexically appears. These are inherent static analysis limits;
+chase does not run name resolution.
+
+The PureScript reference-collector is a hand-rolled walker over
+`CST.Expr` constructors. SYB would have picked up new upstream
+constructors automatically, but the vendored CST does not derive
+`Data` on all of its types. If the vendored PureScript version is
+bumped and upstream adds new `CST.Expr` constructors, the walker
+needs an explicit case for each one; refs inside missing constructors
+will be silently dropped from the index. The Haskell walker via SYB
+does not have this exposure.
 
 ## Why this and not Haddock?
 
@@ -491,28 +714,34 @@ examples, and source.
 audience already has the type signatures (those are emitted verbatim).
 What it doesn't have is the room to read paragraphs, the patience to
 chase examples, or the ability to fill in unwritten conventions. The
-`!` invariant format and the `>` consumed-by format are optimized for
-that constraint: one line per fact, attached to the function it
-describes, sized for an LLM's working memory.
+`!` invariant format, the `>` consumed-by format, and the `?`
+coverage-gap format are optimized for that constraint: one line per
+fact, attached to the function it describes, sized for an LLM's working
+memory.
 
 You can use both. They serve different readers.
 
 ## Build
 
-Standard cabal:
+The flake provides a GHC 9.10 dev shell. The PureScript CST parser
+must be vendored into the source tree before the first build:
 
-    cabal build
-    cabal run chase -- <source-root> <output> [<annotations.json>]
-
-The flake provides a GHC 9.10 dev shell:
-
+    nix run .#vendor-purescript-cst
     nix develop
+    cabal build
+    cabal run chase -- <source-path> [-o output] [-a annotations.json] [-t test-dirs]
+
+The vendor step only needs to be repeated when the upstream PureScript
+version is bumped in `flake.nix` (or when you want to refresh from a
+clean state). The resulting `vendor/purescript-cst/` directory is
+expected to be present at build time but should not be committed
+verbatim; gitignore it and treat it as generated.
 
 ## Status
 
 Working tool. Tested on four real codebases:
 
-- chase itself (Haskell, 8/8 modules ok, self-annotated)
+- chase itself (Haskell, 9/9 modules ok, self-annotated, self-test-covered)
 - cheeblr backend (Haskell, ~66 modules, ~9,000 lines, includes crem
   state machines with TemplateHaskell-driven singletons and aeson-TH
   JSON derivation)
@@ -532,12 +761,30 @@ failed on 33% of pelotero-engine files due to GADT-style
 TemplateHaskell-using state machine modules. The PureScript path was
 added when annotating cheeblr's frontend made it clear that
 single-language coverage was leaving half the system invisible to the
-LLM. The `openIssues` annotation type was added after annotating
-pelotero-engine surfaced enough known-bad behaviors that mixing them
-into `decisions` as TODO-flavored entries was making the decision list
-incoherent: decisions are settled tradeoffs you would defend, open
-issues are unresolved problems, and the `blocking` field on open
-issues captures something decisions don't have a slot for.
+LLM. The PureScript parser itself was then switched from a line-based
+column-0 anchor scanner to the vendored upstream CST parser once it
+became clear that the heuristic scanner was both fragile (any deviation
+from idiomatic formatting broke it) and lossy (no source positions on
+sub-declaration spans, no structured error reporting, no real handle on
+`else instance` chains or operator sections). The `openIssues`
+annotation type was added after annotating pelotero-engine surfaced
+enough known-bad behaviors that mixing them into `decisions` as
+TODO-flavored entries was making the decision list incoherent.
+
+Test coverage analysis was added as a separate orthogonal pass on top
+of the existing pipeline, covering both Haskell and PureScript test
+files. The deliberate choice to use static reference scanning (HsVar
+via SYB on the Haskell side, an explicit CST expression walker on the
+PureScript side) rather than HPC instrumentation keeps it offline,
+fast, and decoupled from any test runner. It also means the `?` line
+is a smell test, not a coverage guarantee. The honest framing is: a
+function with no test references is almost certainly untested; a
+function with many test references is at least exercised, but the
+quality of that exercise is something static analysis cannot speak to.
+
+The CLI was also rebuilt around `optparse-applicative` with
+auto-detection for both annotations and test roots, so the common case
+(`chase src`) needs no flags.
 
 Honest open questions:
 
@@ -547,12 +794,16 @@ Honest open questions:
   larger than a few thousand lines, especially the `consumes`
   curation, which is exactly the kind of cross-cutting metadata that
   rots fastest on a moving codebase.
-- Whether the PureScript line-based scanner is robust enough for
-  PureScript code that doesn't follow the cheeblr style conventions.
-  The cheeblr frontend is the only large PureScript codebase it's been
-  tested against; other styles (e.g. heavy use of operator sections at
-  the top level, unusual import indentation) could expose scanner
-  gaps.
+- Whether the static-reference coverage pass is useful in practice or
+  whether the false-positive rate from unqualified name collisions
+  (now cross-language) makes it noisy enough to discount entirely.
+  The fix (qualifier tracking) is known; whether it's worth doing
+  depends on whether anyone hits the false-positive case enough to
+  care.
+- Whether the PureScript ref walker needs to be regenerated or
+  retired the next time upstream CST adds new constructors. The cost
+  of a missed constructor is silent: refs inside it just don't
+  contribute to the index.
 - Whether the next move is to extend annotations further (cross-module
   drift checking for `consumes`, file-path keying to handle `Main`
   collisions and Haskell/PureScript module-name collisions, structured
