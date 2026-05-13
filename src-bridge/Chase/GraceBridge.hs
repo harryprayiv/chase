@@ -1,9 +1,9 @@
-{-# LANGUAGE DeriveAnyClass       #-}
-{-# LANGUAGE DeriveGeneric        #-}
-{-# LANGUAGE DerivingStrategies   #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE OverloadedStrings    #-}
-{-# LANGUAGE RecordWildCards      #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RecordWildCards       #-}
 
 -- | Glue layer between chase and grace.
 --
@@ -35,9 +35,6 @@ import qualified Chase.Pipeline as Pipeline
 import qualified Chase.Types    as CT
 
 -- | Inputs the grace prompt template expects, as a record.
---
--- Field order does not matter: Grace's marshalling indexes records by
--- field name via the Selector class.
 data GenArgs = GenArgs
   { key            :: Key
   , bundle         :: Text
@@ -53,9 +50,13 @@ data GenAnnotations = GenAnnotations
   } deriving stock    (Generic, Show)
     deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
 
+-- | One invariant attached to a signature. `body` is the list of
+-- behavioural facts that render under the signature in chase output
+-- (the lines prefixed with `!`). Named `body` rather than `lines` so it
+-- does not shadow `Prelude.lines` under `RecordWildCards`.
 data GenInvariant = GenInvariant
   { function :: Text
-  , lines    :: [Text]
+  , body     :: [Text]
   , consumes :: [Text]
   } deriving stock    (Generic, Show)
     deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
@@ -78,8 +79,6 @@ data GenOpenIssue = GenOpenIssue
     deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
 
 -- | Decode the grace template as a typed Haskell function.
---
--- Call this once and reuse the returned function across modules.
 loadGenerator
   :: MonadIO m
   => FilePath
@@ -89,10 +88,6 @@ loadGenerator graceTemplate =
 
 -- | Run the generator, then run chase's drift checker, then loop on
 -- drift warnings up to maxRetries times. Returns the last attempt.
---
--- Drift warnings are folded back into the next prompt via GenArgs's
--- driftWarnings field, which the grace template surfaces in the prompt
--- body. The model sees its own previous failure mode and can correct.
 generateWithDriftFeedback
   :: MonadIO m
   => (GenArgs -> IO GenAnnotations)
@@ -123,10 +118,6 @@ generateWithDriftFeedback gen maxRetries chaseFile k bundle =
             else loop (attempt + 1) fresh
 
 -- | Convert the grace-shaped result into chase's existing types.
---
--- Constants and topologies are left empty here because the grace
--- template above does not produce them. Add them by extending the
--- grace schema if you want.
 toModuleAnnotations :: Text -> GenAnnotations -> CT.ModuleAnnotations
 toModuleAnnotations modNm GenAnnotations{..} = CT.ModuleAnnotations
   { CT.annModName    = modNm
@@ -139,7 +130,7 @@ toModuleAnnotations modNm GenAnnotations{..} = CT.ModuleAnnotations
   where
     invToInv GenInvariant{..} = CT.Invariant
       { CT.invFunction = function
-      , CT.invLines    = lines
+      , CT.invLines    = body
       , CT.invConsumes = consumes
       , CT.invBodyHint = Nothing
       }
