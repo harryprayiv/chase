@@ -1,6 +1,6 @@
 %bundle chase v1
-%generated 2026-05-13T01:52:20Z
-%roots /home/bismuth/git/chase/src
+%generated 2026-05-13T01:55:03Z
+%roots /home/bismuth/git/chase/src/
 %files 9 ok, 0 failed
 
 # This file is a chase bundle: structural skeletons of multiple
@@ -1179,4 +1179,206 @@ openIssue :: Text -> Text -> Text -> [Text] -> [Text] -> OpenIssue
 %uses Chase.Annotations.Json
 %uses Chase.Parse
 %uses Chase.Render
+
+=== BEGIN Main.hs ===
+
+%file /home/bismuth/git/chase/app/Main.hs
+%mod Main
+
+%ext LambdaCase, OverloadedStrings, ScopedTypeVariables
+
+%uses Options.Applicative
+%uses Control.Monad
+%uses Data.Map.Strict
+%uses qualified Data.Map.Strict as Map
+%uses Data.Maybe
+%uses Data.Text
+%uses Data.List
+%uses System.Directory
+%uses System.FilePath
+%uses System.IO
+%uses System.Exit
+%uses qualified Chase.Pipeline as Pipeline
+%uses qualified Chase.Annotations.Json as Anno
+%uses Chase.Types
+
+data Options = Options
+  { optSource      :: FilePath
+  , optOutput      :: Maybe FilePath
+  , optAnnotations :: AnnotationsMode
+  , optTests       :: TestsMode
+  , optQuiet       :: Bool
+  }
+
+data AnnotationsMode = AnnAuto | AnnFile FilePath | AnnOff
+
+data TestsMode       = TestsAuto | TestsExplicit [FilePath] | TestsOff
+
+main :: IO ()
+  ! accepts 2, 3, or 4 positional args; anything else prints usage to stderr and exits non-zero
+  ! the 4th arg is the test root for coverage analysis
+
+parserInfo :: ParserInfo Options
+
+options :: Parser Options
+
+run :: Options -> IO ()
+
+resolveAnnotations
+  :: FilePath -> Bool -> AnnotationsMode -> IO (Maybe FilePath)
+
+resolveTests :: FilePath -> Bool -> TestsMode -> IO [FilePath]
+
+loadAnnotationsOrDie
+  :: Bool -> Maybe FilePath -> IO (Map Text ModuleAnnotations)
+  ! Nothing input -> empty Map (no annotations file in play)
+  ! Just path -> calls loadAnnotations; on Left, prints to stderr and exits non-zero
+  ! prints a 'load <path> (N modules)' line on success for operator feedback
+  > consumed by: main.runWith (only caller)
+
+findFirst :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
+
+splitCommas :: String -> [String]
+
+%decision AnnotationsAreOptionalNotRequired
+  what:    The bare runner produces structure-only output if no annotations file is found; annotations are auto-detected from cwd
+  why:     First-run experience: someone clones chase, runs it on their codebase, gets useful structure-only output without authoring anything. Default behavior is 'look for ./chase-annotations.json next to where you ran me'. If found, used. If absent, silent empty. An explicitly-passed annotations path that doesn't exist is a hard error (typos in CLI args should fail loudly). This matches how compilers handle .ghci, .nixrc, etc: implicit local config is opt-in, explicit paths are mandatory.
+  affects: resolveAnnotationsPath, loadAnnotationsOrDie
+
+%decision TestRootIsExplicitOptIn
+  what:    The test root is the 4th positional CLI arg; it is NOT auto-detected from cwd
+  why:     Auto-detecting './test' against a source root of 'backend/src' would mean looking for './test', './backend/test', '../test', and other paths; the heuristics get confused fast. Opt-in by explicit path is also a signal of intent: passing the test root means you've decided you want coverage analysis. Silently running it on any directory called 'test' that happens to exist would be a surprise. Like the annotations path: explicit-but-missing is a hard error (you typoed and should know); implicit-and-missing is silent (you didn't ask for it).
+  affects: resolveTestRoot
+
+
+
+=== BEGIN Main.hs ===
+
+%file /home/bismuth/git/chase/app-annotate/Main.hs
+%mod Main
+
+%ext LambdaCase, OverloadedStrings, RecordWildCards
+
+%uses qualified Data.Aeson as A
+%uses qualified Data.Aeson.Key as Key
+%uses qualified Data.Aeson.KeyMap as KM
+%uses qualified Data.ByteString.Lazy as LBS
+%uses Data.Text
+%uses qualified Data.Text.IO as TIO
+%uses Options.Applicative
+%uses System.Exit
+%uses System.IO
+%uses qualified Chase.GraceBridge as GB
+%uses qualified Chase.Parse as Parse
+%uses qualified Chase.Render as Render
+%uses qualified Chase.Types as CT
+%uses Grace.Decode
+
+data Opts = Opts
+  { optSource     :: FilePath
+  , optKey        :: Text
+  , optTemplate   :: FilePath
+  , optOutput     :: FilePath
+  , optMaxRetries :: Int
+  }
+
+opts :: Parser Opts
+
+main :: IO ()
+  ! accepts 2, 3, or 4 positional args; anything else prints usage to stderr and exits non-zero
+  ! the 4th arg is the test root for coverage analysis
+
+annotationsToJSON :: Text -> CT.ModuleAnnotations -> A.Value
+
+invariantsToJSON :: [CT.Invariant] -> A.Value
+
+decisionToJSON :: CT.Decision -> A.Value
+
+openIssueToJSON :: CT.OpenIssue -> A.Value
+
+%decision AnnotationsAreOptionalNotRequired
+  what:    The bare runner produces structure-only output if no annotations file is found; annotations are auto-detected from cwd
+  why:     First-run experience: someone clones chase, runs it on their codebase, gets useful structure-only output without authoring anything. Default behavior is 'look for ./chase-annotations.json next to where you ran me'. If found, used. If absent, silent empty. An explicitly-passed annotations path that doesn't exist is a hard error (typos in CLI args should fail loudly). This matches how compilers handle .ghci, .nixrc, etc: implicit local config is opt-in, explicit paths are mandatory.
+  affects: resolveAnnotationsPath, loadAnnotationsOrDie
+
+%decision TestRootIsExplicitOptIn
+  what:    The test root is the 4th positional CLI arg; it is NOT auto-detected from cwd
+  why:     Auto-detecting './test' against a source root of 'backend/src' would mean looking for './test', './backend/test', '../test', and other paths; the heuristics get confused fast. Opt-in by explicit path is also a signal of intent: passing the test root means you've decided you want coverage analysis. Silently running it on any directory called 'test' that happens to exist would be a surprise. Like the annotations path: explicit-but-missing is a hard error (you typoed and should know); implicit-and-missing is silent (you didn't ask for it).
+  affects: resolveTestRoot
+
+
+=== BEGIN Chase/GraceBridge.hs ===
+
+%file /home/bismuth/git/chase/src-bridge/Chase/GraceBridge.hs
+%mod Chase.GraceBridge
+
+%ext DeriveAnyClass, DeriveGeneric, DerivingStrategies, DuplicateRecordFields, OverloadedStrings, RecordWildCards
+
+%uses Control.Monad.IO.Class
+%uses Data.Aeson
+%uses Data.Text
+%uses GHC.Generics
+%uses Grace.Decode
+%uses Grace.Encode
+%uses Grace.Input
+%uses Grace.Interpret
+%uses qualified Chase.Pipeline as Pipeline
+%uses qualified Chase.Types as CT
+
+data GenArgs = GenArgs
+  { key            :: Key
+  , bundle         :: Text
+  , modName        :: Text
+  , driftWarnings  :: [Text]
+  } deriving stock    (Generic, Show)
+    deriving anyclass (ToGrace, ToGraceType)
+
+data GenAnnotations = GenAnnotations
+  { invariants :: [GenInvariant]
+  , decisions  :: [GenDecision]
+  , openIssues :: [GenOpenIssue]
+  } deriving stock    (Generic, Show)
+    deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
+
+data GenInvariant = GenInvariant
+  { function :: Text
+  , body     :: [Text]
+  , consumes :: [Text]
+  } deriving stock    (Generic, Show)
+    deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
+
+data GenDecision = GenDecision
+  { name    :: Text
+  , what    :: Text
+  , why     :: Text
+  , affects :: [Text]
+  } deriving stock    (Generic, Show)
+    deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
+
+data GenOpenIssue = GenOpenIssue
+  { name     :: Text
+  , what     :: Text
+  , why      :: Text
+  , blocking :: [Text]
+  , affects  :: [Text]
+  } deriving stock    (Generic, Show)
+    deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
+
+loadGenerator
+  :: MonadIO m
+  => FilePath
+  -> m (GenArgs -> IO GenAnnotations)
+
+generateWithDriftFeedback
+  :: MonadIO m
+  => (GenArgs -> IO GenAnnotations)
+  -> Int             -- ^ maxRetries
+  -> CT.ChaseFile    -- ^ the parsed file these annotations attach to
+  -> Key             -- ^ OpenAI key
+  -> Text            -- ^ bundle text (chase output for this module)
+  -> m (GenAnnotations, [Text])
+
+toModuleAnnotations :: Text -> GenAnnotations -> CT.ModuleAnnotations
+
+mergeForCheck :: CT.ChaseFile -> CT.ModuleAnnotations -> CT.ChaseFile
 

@@ -1,0 +1,1309 @@
+{
+  "version": 1,
+  "modules": {
+
+    "Chase.Types": {
+      "decisions": [
+        {
+          "name": "NoteAndBugNoteAreDistinctConstructors",
+          "what": "Note carries a plain string; BugNote signals 'this is a known wart'",
+          "why": [
+            "BUG annotations are visually distinct in rendered output (BUG: prefix).",
+            "Severity could have been a separate field but a two-constructor sum is cheaper at the JSON parser, the renderer, and the eye.",
+            "If a third category becomes useful (TODO, DEPRECATED), this is the place to grow."
+          ],
+          "affects": ["constNote", "constBug"]
+        },
+        {
+          "name": "InvariantHasFourPartShape",
+          "what": "Invariant = function name + ! lines + > consumes + optional hint",
+          "why": [
+            "invLines and invConsumes are rendered with different sigils (! vs >) and carry different semantics: facts vs downstream pointers.",
+            "Keeping them as separate list fields rather than merging into one tagged list keeps the JSON loader simple and the renderer's job mechanical.",
+            "invBodyHint is the escape hatch for cases where the body genuinely matters and the annotator wants to point at it."
+          ],
+          "affects": ["inv", "invHinted"]
+        },
+        {
+          "name": "TestCoverageIsMaybeNotEmpty",
+          "what": "chaseTestCoverage is Maybe [(Text, [TestRef])], not just [(Text, [TestRef])]",
+          "why": [
+            "Nothing means 'coverage analysis did not run for this build'; Just [] would conflate 'analyzed and nothing tested anything' with 'never analyzed'.",
+            "The renderer needs to distinguish: Nothing -> emit no ? lines at all (clean output when the feature is off); Just <list> -> emit ? lines on every signature (including 'no test references' for the uncovered ones, which is the useful information).",
+            "Without the Maybe, you cannot tell a structure-only run from a covered-but-all-empty run by inspecting the chase output."
+          ],
+          "affects": ["emptyChaseFile"]
+        }
+      ],
+      "invariants": {
+        "emptyChaseFile": [
+          "all annotation fields default to empty; structural fields are filled in by Chase.Parse.extractStructure",
+          "chaseSourcePath is the only field set at construction; everything else is added later",
+          "chaseTestCoverage defaults to Nothing; Chase.Coverage.attachCoverage flips it to Just when coverage analysis runs"
+        ],
+        "emptyAnnotations": [
+          "annModName is set; the four annotation lists default to empty",
+          "callers add fields by record update"
+        ],
+        "inv": {
+          "notes": [
+            "smart constructor that defaults invConsumes to [] and invBodyHint to Nothing",
+            "this is the path used by the JSON parser when an invariant value is a flat array of strings"
+          ],
+          "consumes": [
+            "Chase.Annotations.Json.parseInvariantValue (array branch)"
+          ]
+        },
+        "invHinted": [
+          "smart constructor that defaults invConsumes to [] but sets invBodyHint",
+          "no current code path constructs an Invariant with both consumes and a body hint via a smart constructor; record syntax is required for that combination"
+        ],
+        "decision": [
+          "positional smart constructor matching the Decision data constructor field order",
+          "no defaulting; all four fields are required"
+        ]
+      }
+    },
+
+    "Chase.Coverage": {
+      "decisions": [
+        {
+          "name": "StaticReferenceScanNotHPC",
+          "what": "Coverage is computed by walking each test file's AST and collecting variable references, NOT by running tests under HPC instrumentation",
+          "why": [
+            "HPC is the canonical Haskell coverage tool but requires actually running the test suite (cabal test --enable-coverage) and parsing .tix files. That couples chase to your build system, your test runner, and the cwd at the time of running.",
+            "Static reference scanning is offline: just parse test source. No build system involvement, no execution required, runs in milliseconds.",
+            "The honest tradeoff: a name reference is NOT proof of behavioral testing. A test that mentions foo could be using it as a type annotation, a side dependency, or even printing its source line in a diagnostic. The output is a smell test (zero references = almost certainly untested), not a guarantee.",
+            "If you need true coverage, run HPC separately; chase is not a replacement for it. The intent of the ? line is to surface obvious gaps cheaply, not to certify coverage."
+          ],
+          "affects": ["parseTestFile", "scanTestFile", "buildTestIndex", "collectVarsIn"]
+        },
+        {
+          "name": "TopLevelFunBindOnly",
+          "what": "Only top-level FunBindings are recorded as test bindings; PatBindings and nested let-bindings are not surfaced as tests",
+          "why": [
+            "A test in Haskell is almost always 'testFooHandlesX = ...' (a FunBind). PatBindings like '(a, b) = setup' produce values, not test cases, and tying them to a test name is awkward (which of a or b is 'the test'?).",
+            "Refs inside the RHS of a PatBind that ARE relevant get picked up indirectly: the PatBind's body is part of the module, and any FunBind whose body references those names will still produce TestRefs. The PatBind itself just isn't a 'test'.",
+            "Nested let-bindings are deliberately ignored. Their refs are picked up by collectVarsIn walking the enclosing FunBind body, so we don't lose coverage signal, we just don't get a 'tested by: SomeModule.someNestedHelper' line."
+          ],
+          "affects": ["fromDecl", "scanTestFile"]
+        },
+        {
+          "name": "SelfReferencesAreDropped",
+          "what": "buildTestIndex filters out the case where a test binding references its own name (recursion)",
+          "why": [
+            "Recursive helpers like 'go n = if n <= 0 then [] else n : go (n - 1)' would otherwise appear as 'go tested by: TestModule.go', which is uninformative noise.",
+            "The filter is safe: a real production function with the same name as a test binding would still show up if any OTHER test binding references it. We only drop the self-loop."
+          ],
+          "affects": ["buildTestIndex"]
+        },
+        {
+          "name": "SYBTraversalForRobustness",
+          "what": "collectVarsIn uses SYB's 'everything' combinator over the Data instance instead of hand-rolled HsExpr traversal",
+          "why": [
+            "HsExpr has 30+ constructors (HsApp, HsLam, HsLet, HsCase, HsIf, HsDo, HsTuple, HsList, HsOpApp, SectionL, SectionR, HsRecordCon, ExprWithTySig, ...) and ghc-lib-parser adds new ones across minor versions.",
+            "A hand-rolled recursive traversal must enumerate every constructor and call itself on every sub-expression, and miss any new constructor silently.",
+            "SYB.everything walks any Data-derived structure generically: it visits every subterm and applies our HsVar query wherever it fires. New AST constructors are picked up automatically with no change here.",
+            "The cost is one extra dependency (syb) and the small runtime overhead of generic dispatch. For chase's scale (parse hundreds of test files once) this is invisible."
+          ],
+          "affects": ["collectVarsIn"]
+        },
+        {
+          "name": "TestFileDispatchByExtension",
+          "what": "parseTestFile dispatches by extension to parseHaskellTestFile or parsePureScriptTestFile; the per-language workers are exposed alongside it so callers that already know the language can skip the dispatch",
+          "why": [
+            "The two test parsers have nothing in common at the implementation level: parseHaskellTestFile reuses Chase.Parse.Haskell.parseHsModule plus a SYB walk, parsePureScriptTestFile defers to Chase.Parse.PureScript.scanTestBindings which already does its own CST walk and returns refs structurally.",
+            "Exposing both per-language entry points makes the dispatcher trivial (case on takeExtension) and leaves room for the pipeline to short-circuit dispatch when it has filtered by extension already.",
+            "Symmetry with Chase.Parse.parseSourceFile: same shape, same dispatch convention, same return type."
+          ],
+          "affects": ["parseTestFile", "parseHaskellTestFile", "parsePureScriptTestFile"]
+        }
+      ],
+      "openIssues": [
+        {
+          "name": "UnqualifiedNameMatching",
+          "what": "Test refs are matched by unqualified name only; two source modules exporting the same function name will both receive the same test refs",
+          "why": [
+            "collectVarsIn extracts occNameString from RdrName, dropping any qualifier. A test that calls 'Chase.Parse.parseSourceFile' and a test that calls 'Chase.Parse.Haskell.parseSourceFile' both produce a TestRef keyed by 'parseSourceFile'.",
+            "When the chase output renders, both Chase.Parse.parseSourceFile and Chase.Parse.Haskell.parseSourceFile signatures get the SAME tested-by list. One is accurate, the other is a false positive.",
+            "Fix: extract qualifiers from Qual RdrNames and match the qualifier prefix against the source module name during attachment. Requires plumbing the source module name through attachCoverage."
+          ],
+          "blocking": ["accurate coverage attribution in projects with naming collisions across modules"],
+          "affects": ["collectVarsIn", "attachCoverage", "buildTestIndex"]
+        },
+        {
+          "name": "HigherOrderReferencesMissed",
+          "what": "A test that exercises foo via a higher-order indirection or stored reference can produce false negatives; a test that exercises foo through a renamed alias can also miss",
+          "why": [
+            "The HsVar walker catches anything that lexically appears in expression position with the target name. List-of-functions like '[foo, bar]' is fine; foo and bar appear as HsVar.",
+            "Things genuinely missed: function references introduced by Template Haskell splices (the splice output is what we'd want to walk, but ghc-lib-parser doesn't run splices); refs hidden behind generic dispatch (Generic-deriving, instance method dispatch); refs that only appear at the type level (rare for tests); refs accessed exclusively through a record-selector field or a type class method where the underlying function name is never lexically present in the test.",
+            "These are inherent limits of static analysis without name resolution. Documenting them is more honest than promising they don't exist."
+          ],
+          "blocking": [],
+          "affects": ["collectVarsIn"]
+        },
+        {
+          "name": "PureScriptCoverageNotWiredAtPipeline",
+          "what": "parsePureScriptTestFile is implemented and correct but Chase.Pipeline.buildTestIndexOrEmpty still filters test roots to '.hs' only, so .purs test files never reach this code path",
+          "why": [
+            "The per-language test parser exists and works in isolation. The remaining work is in Chase.Pipeline: drop the takeExtension == '.hs' filter, route .purs paths through parsePureScriptTestFile, and decide how cross-language name collisions (a Haskell foo and a PureScript foo sharing the unqualified index key) get attributed.",
+            "Until that wiring lands, calling parsePureScriptTestFile directly works for any external caller that already has a .purs path; the pipeline just won't initiate those calls automatically."
+          ],
+          "blocking": ["test-coverage analysis for PureScript modules"],
+          "affects": ["parsePureScriptTestFile", "parseTestFile"]
+        }
+      ],
+      "invariants": {
+        "parseTestFile": {
+          "intent": "Dispatcher: route a test file to parseHaskellTestFile or parsePureScriptTestFile based on its extension",
+          "effects": ["IO"],
+          "notes": [
+            "case-sensitive on extension via takeExtension (System.FilePath does not lowercase)",
+            ".hs -> parseHaskellTestFile",
+            ".purs -> parsePureScriptTestFile",
+            "any other extension returns Left ParseFailure with an 'unsupported test file extension' message; defensive, since the caller filters by extension before dispatch"
+          ],
+          "consumes": [
+            "Chase.Pipeline.buildTestIndexOrEmpty (called once per test file when cfgTestRoots is non-empty)"
+          ]
+        },
+        "parseHaskellTestFile": {
+          "intent": "Parse a .hs test file and extract its top-level FunBindings with their referenced variable names",
+          "effects": ["IO"],
+          "notes": [
+            "delegates parsing to Chase.Parse.Haskell.parseHsModule; same parser used for source files",
+            "module name comes from Chase.Parse.Haskell.moduleNameOf; '' for files without a module header",
+            "the ref walk uses scanTestFile + collectVarsIn (SYB); see decision SYBTraversalForRobustness",
+            "ParseFailure is returned as Left; the pipeline prints a warning and skips the file"
+          ],
+          "consumes": [
+            "Chase.Coverage.parseTestFile (single caller, .hs branch of the dispatcher)"
+          ]
+        },
+        "parsePureScriptTestFile": {
+          "intent": "Parse a .purs test file and extract its top-level value bindings with their referenced names, packaged as [TestBinding]",
+          "effects": ["IO"],
+          "notes": [
+            "delegates to Chase.Parse.PureScript.scanTestBindings, which already returns (moduleName, [(fnName, srcLine, [refs])]) by walking the CST",
+            "the (fnName, line, refs) tuples are repackaged as TestBinding values so the rest of Chase.Coverage can index them with the same TestRefIndex shape as Haskell bindings",
+            "self-reference filtering happens inside scanTestBindings on the PureScript side (decision SelfReferencesFilteredAtExtractionTime in Chase.Parse.PureScript); no additional filter runs here",
+            "currently unreachable from the standard pipeline run; see open issue PureScriptCoverageNotWiredAtPipeline"
+          ],
+          "consumes": [
+            "Chase.Coverage.parseTestFile (single caller, .purs branch of the dispatcher)"
+          ]
+        },
+        "scanTestFile": [
+          "pure: takes an already-parsed HsModule and returns one TestBinding per top-level FunBind",
+          "PatBinds, ClsInstD, type/class/data decls all produce zero TestBindings; only FunBind matches",
+          "the tbRefs field is deduplicated via Data.List.nub; a test binding that mentions foo five times produces one occurrence in tbRefs"
+        ],
+        "fromDecl": [
+          "internal helper used by scanTestFile; pattern-matches on the LHsDecl and returns a singleton or empty list",
+          "the line number comes from startLine on the declaration's SrcSpan, same convention as Chase.Parse.Haskell"
+        ],
+        "buildTestIndex": {
+          "notes": [
+            "inverts a flat list of TestBindings into a Map from referenced name to list of TestRefs",
+            "self-references (a binding referring to its own name, i.e. recursion) are filtered out before indexing; see decision SelfReferencesAreDropped",
+            "within a single index entry, TestRefs are deduplicated by (trModule, trFunction) and sorted by trSrcLine",
+            "duplicate refs from the same (module, function) are coalesced; the line of the FIRST occurrence wins after sorting"
+          ],
+          "consumes": [
+            "Chase.Pipeline.buildTestIndexOrEmpty (single caller; the index is then handed to every attachCoverage call)"
+          ]
+        },
+        "attachCoverage": {
+          "intent": "Populate chaseTestCoverage by looking up each signature, foreign import, and pattern name in the index",
+          "notes": [
+            "iterates chaseSignatures, then chaseForeignImports, then chasePatterns; produces one entry per name in those lists",
+            "the value for a name with no test refs is the empty list, NOT a missing key; this lets the renderer emit 'no test references' explicitly",
+            "the result is always Just <list>, never Nothing; Nothing is the 'didn't run' state that only emptyChaseFile produces"
+          ],
+          "consumes": [
+            "Chase.Pipeline.applyPasses (only caller; runs after attachAnnotations, only when cfgTestRoots is non-empty)"
+          ]
+        },
+        "collectVarsIn": [
+          "polymorphic in the input: any Data-derived AST node works (MatchGroup, GRHSs, HsExpr, anything reachable from a FunBind body)",
+          "visits every subterm via SYB.everything; the HsVar query fires anywhere a variable reference appears in expression position",
+          "constructor patterns, type-level references, and identifier-position references in pattern matches are NOT collected; only HsVar in expressions",
+          "result is a flat [Text] of unqualified names; deduplication happens at the call site via nub"
+        ],
+        "rdrNameToText": [
+          "duplicated from Chase.Parse.Haskell to avoid importing internal helpers across modules",
+          "extracts occNameString via rdrNameOcc; produces the unqualified identifier text"
+        ],
+        "startLine": [
+          "duplicated from Chase.Parse.Haskell for the same reason",
+          "RealSrcSpan -> 1-indexed start line; UnhelpfulSpan -> 0"
+        ]
+      }
+    },
+
+    "Chase.Parse": {
+      "decisions": [
+        {
+          "name": "ExtensionBasedDispatch",
+          "what": "parseSourceFile selects the language by file extension: .hs goes to Chase.Parse.Haskell, .purs goes to Chase.Parse.PureScript",
+          "why": [
+            "The two languages need fundamentally different parsing strategies (ghc-lib-parser AST vs vendored PureScript CST), so there is no shared parser core to factor.",
+            "Dispatch by extension is the cheap universal signal; no need to peek at file contents or first-line sniff.",
+            "Unknown extensions are unreachable in practice because Chase.Pipeline.findSourceFiles filters input by extension before dispatch; the unsupported-extension branch is defensive only."
+          ],
+          "affects": ["parseSourceFile"]
+        }
+      ],
+      "invariants": {
+        "parseSourceFile": {
+          "intent": "Thin dispatcher: route a source file to the per-language parser based on its extension",
+          "effects": ["IO"],
+          "notes": [
+            "case-sensitive on extension via takeExtension (System.FilePath does not lowercase)",
+            ".hs -> Chase.Parse.Haskell.parseSourceFile",
+            ".purs -> Chase.Parse.PureScript.parseSourceFile",
+            "any other extension returns Left ParseFailure with 'unsupported source extension'; this is defensive, since findSourceFiles already filters",
+            "this module is the only place a caller should reach for parsing; Chase.Pipeline never imports the language-specific parsers directly"
+          ]
+        }
+      }
+    },
+
+    "Chase.Parse.Haskell": {
+      "decisions": [
+        {
+          "name": "ParserIsGhcLibParser",
+          "what": "Use ghc-lib-parser as the parser; no manual fixity or extension list",
+          "why": [
+            "ghc-lib-parser is a snapshot of GHC's own parser exposed as a library. It accepts any syntax GHC accepts, including effectful-style GADT data declarations with inline kind signatures, modern type families, standalone kind signatures, and forward-compatible additions.",
+            "The previous backend was haskell-src-exts plus a hand-maintained extension and operator-fixity list. It failed on real codebases (33% file failure rate on pelotero-engine due to 'data X :: Effect where' form) and the maintenance burden of the lists was a continuous tax.",
+            "ghc-lib-parser tracks GHC by ~one month, so the version of Haskell chase parses is determined by which ghc-lib-parser cabal resolves. cabal-version constraints leave the upper bound generous so chase auto-tracks.",
+            "Cost: a much larger transitive dependency closure and a more involved Settings construction (see the probedSettings family for the placeholder values needed). Once configured, the parser-only call path never touches any of the driver state."
+          ],
+          "affects": ["parseSourceFile", "parseHsModule"]
+        },
+        {
+          "name": "RawAstExposedForCoverage",
+          "what": "parseHsModule is exposed alongside parseSourceFile and returns the raw HsModule plus source text",
+          "why": [
+            "Chase.Coverage needs to walk the test file's AST to collect HsVar references. The structural-skeleton ChaseFile produced by parseSourceFile has thrown that information away.",
+            "Re-parsing test files inside Chase.Coverage would duplicate the parser setup (probedSettings, applySourcePragmas, etc.); exposing parseHsModule and consuming it from Coverage keeps the parser logic in one place.",
+            "parseSourceFile is now a thin wrapper over parseHsModule + extractStructure, which also simplifies the original function."
+          ],
+          "affects": ["parseHsModule", "parseSourceFile"]
+        },
+        {
+          "name": "PragmasReadFromSourceTextNotAst",
+          "what": "LANGUAGE pragmas are extracted by a textual scan of the source preamble, not by walking the AST",
+          "why": [
+            "GHC parses pragmas before the module body, so they do not appear in hsmodDecls.",
+            "Reading them off the source text directly is cheaper, more direct, and survives any AST shape change in future ghc-lib-parser versions.",
+            "The scan stops at the first non-blank, non-comment, non-pragma line, so it never reads past the preamble."
+          ],
+          "affects": ["pragmasFromSource"]
+        },
+        {
+          "name": "HeadOnlyForClassAndInstance",
+          "what": "ClassDecl and InstDecl render only the head line, not the body",
+          "why": [
+            "Class bodies are method signatures, already extracted separately by extractSignatures. Rendering the body in extractDataDecl would duplicate them.",
+            "Instance bodies are method definitions. chase deliberately drops function bodies everywhere else, so dropping instance method bodies is consistent.",
+            "For deeply-indented class or instance declarations spanning many lines, this also reduces token count substantially."
+          ],
+          "affects": ["extractDataDecl", "sliceFirstLine"]
+        },
+        {
+          "name": "ExtensionImplicationsAppliedExplicitly",
+          "what": "TemplateHaskell -> TemplateHaskellQuotes is applied by hand in applySourcePragmas",
+          "why": [
+            "ghc-lib-parser's xopt_set sets exactly the named extension bit. It does NOT walk impliedXFlags, the table that says 'enabling X also enables Y'.",
+            "GHC's own driver expands implications before handing flags to the parser; in our parser-only call path, no driver runs, so implications would silently fail to apply.",
+            "Symptom of NOT applying this implication: files using $(...) splices fail with 'parse error on input `$`' even when -XTemplateHaskell is in the source. The `$` lexer rule is gated on TemplateHaskellQuotesBit, not TemplateHaskellBit.",
+            "Currently TemplateHaskell -> TemplateHaskellQuotes is the only parser-level implication chase has hit. If others surface, add them in applyOne. A more general fix would import impliedXFlags and apply it transitively, at the cost of pulling in more of GHC's driver surface."
+          ],
+          "affects": ["applySourcePragmas"]
+        },
+        {
+          "name": "CppHandledByLineBlanking",
+          "what": "Files declaring LANGUAGE CPP are preprocessed by blanking out every line whose first non-whitespace character is '#'; both branches of #if/#else survive",
+          "why": [
+            "Without preprocessing, ghc-lib-parser fails on real codebases the moment a CPP directive appears (Grace.Compat was the trigger: 'parse error on input #'). The parser itself does no CPP handling; GHC's driver normally invokes a preprocessor before parsing, but chase runs the parser standalone.",
+            "Blanking (replacing each '#'-prefixed line with an empty line) is preferred over deleting because every SrcSpan in the resulting AST still indexes into the original source line list with correct line numbers. Deleting would shift everything below the first directive.",
+            "BOTH branches of #if/#else are kept on purpose. chase exists to give an LLM a structural skeleton; for compat shims (Grace.Compat has two fromAesonMap signatures with different types, one per branch), seeing both is more informative than picking one. Producing technically un-compilable Haskell is acceptable because chase is not a compiler.",
+            "The alternative is cpphs. Rejected because (a) cabal-style MIN_VERSION_pkg(major,minor,patch) macros are undefined in this context and expand to invalid syntax inside #if expressions, (b) cpphs picks exactly one branch, throwing away the dual-signature structural information chase exists to surface, and (c) adds a dependency for marginal benefit.",
+            "Known degradation paths, surfaced via the existing parse-failure pipeline rather than silently mishandled: a CPP conditional that splits a single expression across branches (rare in idiomatic Haskell) produces two non-overlapping fragments and fails to parse; '#define' directives are stripped rather than expanded, so code that depends on macro substitution in a syntactically critical position will also fail.",
+            "Detection is driven by pragmasFromSource: only files with LANGUAGE CPP in the preamble are preprocessed. Files without CPP pay no cost. pragmasFromSource already treats '#'-prefixed lines as preamble lines, so the scan walks past any CPP directives near the top to find subsequent {-# LANGUAGE ... #-} blocks."
+          ],
+          "affects": ["preprocessCpp", "needsCpp", "parseHsModule"]
+        }
+      ],
+      "invariants": {
+        "parseHsModule": {
+          "intent": "Parse one .hs file via ghc-lib-parser, return the source text and AST or a diagnostic",
+          "effects": ["IO"],
+          "notes": [
+            "reads the file as ByteString, decodes as UTF-8",
+            "runs preprocessCpp on the decoded text BEFORE constructing the StringBuffer; LANGUAGE CPP files have their '#'-prefixed lines blanked, all other files pass through unchanged",
+            "the sourceText returned in the Right branch is the POST-preprocessing text, so every SrcSpan in the AST indexes correctly into T.lines sourceText for later slicing",
+            "applies source-level LANGUAGE pragmas to DynFlags via applySourcePragmas BEFORE constructing parser opts",
+            "ParseFailure is data, not an exception; the caller decides whether to skip or abort",
+            "GHC's own parser handles all extensions GHC supports; no manual extension or fixity list is required",
+            "returns the source text alongside the AST so callers that want the raw AST (Chase.Coverage) don't re-read the file"
+          ],
+          "consumes": [
+            "Chase.Parse.Haskell.parseSourceFile (wraps this and runs extractStructure)",
+            "Chase.Coverage.parseHaskellTestFile (uses just the AST and module name)"
+          ]
+        },
+        "parseSourceFile": {
+          "intent": "Thin wrapper over parseHsModule that runs extractStructure on the result",
+          "effects": ["IO"],
+          "notes": [
+            "delegates the actual parser work to parseHsModule",
+            "extractStructure populates the ChaseFile from the HsModule"
+          ],
+          "consumes": [
+            "Chase.Parse.parseSourceFile (the dispatcher invokes this for .hs files)"
+          ]
+        },
+        "preprocessCpp": {
+          "intent": "If the source declares LANGUAGE CPP, blank out every line whose first non-whitespace character is '#'; otherwise return the source unchanged",
+          "notes": [
+            "pure function; no IO, no FFI, no external preprocessor binary",
+            "blanks rather than deletes: each stripped line becomes T.empty so line numbers in the resulting text match line numbers in the original source one-for-one",
+            "only acts when needsCpp returns True; files without LANGUAGE CPP pay one preamble scan and no other cost",
+            "the check on each line uses T.stripStart before testing for a leading '#', so directives that the C standard permits to be indented are also stripped",
+            "{-# LANGUAGE ... #-} pragma blocks start with '{-#' rather than bare '#' and are therefore preserved verbatim; applySourcePragmas can still extract extension flags from the preprocessed buffer",
+            "preserves BOTH branches of #if/#else as live code in the output; this is deliberate per decision CppHandledByLineBlanking"
+          ],
+          "consumes": [
+            "Chase.Parse.Haskell.parseHsModule (single caller; runs before StringBuffer construction)"
+          ]
+        },
+        "needsCpp": [
+          "checks whether the literal string 'CPP' appears as a parsed extension name in pragmasFromSource",
+          "case-sensitive exact match; 'cpp' or 'Cpp' would not trigger preprocessing, matching GHC's handling of LANGUAGE names",
+          "pure function over the source text; called once per parseHsModule invocation"
+        ],
+        "applySourcePragmas": {
+          "intent": "Read LANGUAGE pragmas from source via getOptions, apply each to DynFlags, return the updated flags",
+          "notes": [
+            "must run BEFORE initParserOpts; the parser snapshots ExtBits at construction time",
+            "operates on the POST-preprocessing buffer; CPP-stripped files still carry their {-# LANGUAGE ... #-} blocks intact, so getOptions sees the same pragma set as the raw source",
+            "TemplateHaskell is special-cased to ALSO set TemplateHaskellQuotes; xopt_set does not walk impliedXFlags, and the `$` lexer rule is gated on TemplateHaskellQuotesBit (not TemplateHaskellBit)",
+            "OPTIONS_GHC and -W flags returned by getOptions are silently dropped by parseExtensionFlag",
+            "extension names that aren't in LangExt.Extension fall through silently"
+          ]
+        },
+        "extractStructure": [
+          "produces a ChaseFile from a parsed HsModule by populating module name, pragmas, imports, signatures, and data decls",
+          "constants/invariants/decisions/topologies are left empty here and populated later by Chase.Pipeline.attachAnnotations",
+          "chaseTestCoverage is left Nothing here; populated by Chase.Coverage.attachCoverage in a later pass when cfgTestRoots is set",
+          "the sourceText and sourceLines arguments are the POST-preprocessing values from parseHsModule; for LANGUAGE CPP files, every blanked directive line is an empty string in sourceLines but the indices match the AST's SrcSpans"
+        ],
+        "moduleNameOf": [
+          "returns the literal module name as Text; '' if the file lacks a module header (rare but valid Haskell)",
+          "exported for use by Chase.Coverage when building TestBindings from test files"
+        ],
+        "importsOf": [
+          "pretty-prints each import via GHC's Outputable; the renderer in Chase.Render then collapses whitespace and strips the explicit name list"
+        ],
+        "extractSignatures": {
+          "notes": [
+            "extracts top-level TypeSig declarations AND class method signatures",
+            "ClassDecl bodies have their tcdSigs walked separately by extractClassSig; both top-level and class-method sigs end up in the same flat [Signature] list",
+            "class methods are emitted with UNQUALIFIED names, same shape as top-level signatures, so two classes declaring a method with the same name produce duplicate sigName entries; the renderer attaches at most one invariant per name",
+            "for CPP-preprocessed files, both branches of a #if/#else can produce a Signature with the same sigName but distinct sigSrcLine and sigVerbatim; the renderer treats each as a separate entry"
+          ],
+          "consumes": [
+            "Chase.Render.renderSignaturesWithInvariants (the renderer assumes one Signature per top-level OR class-method binding)"
+          ]
+        },
+        "extractClassSig": [
+          "called per LSig in a class body's tcdSigs list",
+          "delegates to sigToSignatures so any new sig variant only needs to be added in one place"
+        ],
+        "sigToSignatures": [
+          "handles both TypeSig (top-level and most class methods) and ClassOpSig (class methods with default signatures)",
+          "other Sig variants (specialise pragmas, fixity declarations, deprecation warnings) deliberately produce no Signature; only type signatures are tracked"
+        ],
+        "extractDataDecl": [
+          "covers DataDecl, SynDecl, ClassDecl, FamDecl, and the InstD ClsInstD case",
+          "DataDecl, SynDecl, FamDecl render their full source span verbatim (the body IS the signature - constructors, type equation, kind, family equations)",
+          "ClassDecl and InstDecl render only the HEAD line via sliceFirstLine; see decision HeadOnlyForClassAndInstance",
+          "InstDecl uses the pretty-printed instance head as the cdd identifier (e.g. 'A.FromJSON SpecEntry') because instances do not have a single language-level name"
+        ],
+        "rdrNameToText": [
+          "extracts the OccName String from a parse-phase RdrName via rdrNameOcc, then T.pack",
+          "produces the unqualified identifier as written in source"
+        ],
+        "sliceSourceSpan": [
+          "1-indexed line slicing using the SrcSpan from the parser",
+          "trusts the span; no bounds checking against the file length",
+          "if a span is malformed the result is a possibly-truncated string, never a crash, because take/drop on lists are total",
+          "spans without real loc info (UnhelpfulSpan) return empty string"
+        ],
+        "sliceFirstLine": [
+          "returns ONLY the starting line of a source span, no body",
+          "used for ClassDecl and InstDecl heads where the body is undesirable",
+          "spans without real loc info return empty string"
+        ],
+        "pragmasFromSource": [
+          "purely textual scan of the source preamble; does not touch the AST",
+          "stops at the first non-blank, non-comment, non-pragma line",
+          "extracts comma-separated extension lists from {-# LANGUAGE Foo, Bar #-} blocks",
+          "OPTIONS_GHC and other non-LANGUAGE pragmas are ignored",
+          "treats '#'-prefixed lines as preamble lines, so CPP directives at the top of a file do not terminate the pragma scan; this is what lets needsCpp detect LANGUAGE CPP before preprocessCpp runs"
+        ]
+      }
+    },
+
+    "Chase.Parse.PureScript": {
+      "decisions": [
+        {
+          "name": "VendoredCstParserNotLineScanner",
+          "what": "PureScript is parsed by a vendored copy of the purs compiler's CST library (Chase.Vendor.PureScript.CST.*), producing a real AST; the previous column-0 anchor scanner is gone",
+          "why": [
+            "The line-based scanner was brittle: it anchored on column-0 lines, broke on unusual formatters, lost continuation lines in class method sigs, mishandled instance chains, and grew a maintenance tax every time PureScript surface syntax changed.",
+            "A real parser gives every declaration variant a typed handler. New CST constructors become a compiler error in the extractor (missing pattern match) instead of a silent miss.",
+            "purescript-cst on Hackage was the obvious dependency, but its release cadence tracks the purs compiler and its transitive dep graph is heavy. Vendoring under Chase.Vendor.PureScript.CST.* isolates that surface: chase's own code never imports purescript-cst directly, only the vendored modules.",
+            "Cost: the vendored copy must be resynced when PureScript adds language features. The vendor namespace is treated as opaque from chase's perspective; chase annotates only the consuming code in Chase.Parse.PureScript, not the vendor modules themselves.",
+            "Benefits the consumer sees: signatures now carry true multi-line verbatim text via SrcSpan slicing, foreign imports distinguish value/data/kind forms via CST constructors instead of substring matching, fixity declarations get operator names from runOpName instead of fallback word-list scanning, and value-binding bodies can be walked structurally for test coverage (scanTestBindings)."
+          ],
+          "affects": ["parseSourceFile", "parseCstFile", "extractStructure", "scanTestBindings"]
+        },
+        {
+          "name": "TwoStageParseViaResFull",
+          "what": "Parsing runs in two stages: PSParser.parseModule produces a partial result with unresolved layout, and resFull collapses the layout to yield the final Module; either stage can fail",
+          "why": [
+            "PureScript uses indentation-based layout, like Haskell. The lexer emits virtual layout tokens; parseModule produces an AST that still carries unresolved layout state alongside any structural parse errors it could not avoid.",
+            "resFull is the layout resolution pass. It can introduce additional errors (mismatched indentation, unterminated where-blocks) that weren't catchable during the initial parse.",
+            "Both stages return their errors as NonEmpty CSTErr.ParserError. parseCstFile checks both and funnels into the same ParseFailure message via renderParserErrors, so callers see one diagnostic format regardless of which stage failed.",
+            "This is the exact two-stage shape the upstream purs compiler uses. Reordering or merging the stages would mean reimplementing layout resolution, which is the heaviest piece of vendored code."
+          ],
+          "affects": ["parseCstFile", "renderParserErrors"]
+        },
+        {
+          "name": "DeclRangesByNextDeclStart",
+          "what": "declRanges assigns each declaration an end line equal to (next declaration's start line - 1); the last declaration ends at the file's total line count",
+          "why": [
+            "The CST does not carry a single SrcSpan that covers a declaration plus its trailing blank lines and adjacent comments. SrcSpans on individual sub-nodes (tokens, type bodies) exist, but stitching them into a whole-declaration span is fragile.",
+            "Using 'start of next decl - 1' as the end is a geometric heuristic: every line between two declaration anchors belongs to the earlier one. sliceLines then drops trailing blank lines via dropWhile, so the verbatim output stays tight.",
+            "Implication: trailing comments attach to the preceding declaration's chase output, which is usually what the author wanted. Leading comments before a declaration attach to the previous declaration instead, which is slightly worse but consistent and predictable.",
+            "Implication: a declaration whose body extends past the next anchor (impossible in idiomatic PureScript because every declaration starts at column 0 and continuations are indented under it) would be silently truncated. This has not been observed in practice."
+          ],
+          "affects": ["declRanges", "declStartLine", "sliceLines"]
+        },
+        {
+          "name": "ForeignImportsAreSeparateFromSignatures",
+          "what": "foreign import declarations populate chaseForeignImports rather than chaseSignatures, and all three foreign forms (value, data, kind) flow through the same extractor",
+          "why": [
+            "Foreign imports bridge to a runtime FFI module (.js); changing one usually means changing JavaScript or another host-language file. Visually separating them in chase output flags this distinct review surface to the LLM consumer.",
+            "Mechanically the data is shape-compatible with Signature (name plus verbatim text), so they share the Signature type and reuse renderSig in Chase.Render.",
+            "ForeignValue, ForeignData, and ForeignKind all produce a single Signature with the relevant identifier as the name. The CST distinguishes the forms; chase output doesn't, on the grounds that the verbatim text already shows which form was used."
+          ],
+          "affects": ["extractForeignImport", "extractStructure"]
+        },
+        {
+          "name": "HeadOnlyForClassInstanceDerive",
+          "what": "DeclClass, DeclInstanceChain, and DeclDerive render only the first line of the declaration; the body is dropped",
+          "why": [
+            "Class bodies are method signatures, already extracted separately by extractClassMethods. Rendering the body in extractDataDecl would duplicate them.",
+            "Instance bodies are method definitions; chase deliberately drops function bodies everywhere else, so dropping instance bodies is consistent.",
+            "Derive declarations are always a single line in idiomatic PureScript; the head-only path keeps 'derive newtype instance Foo ...' rendering predictable.",
+            "Same rule as Haskell mode (decision HeadOnlyForClassAndInstance in Chase.Parse.Haskell), kept in sync deliberately."
+          ],
+          "affects": ["extractDataDecl", "sliceFirstLine"]
+        },
+        {
+          "name": "ClassMethodsAndTopLevelSigsAreFlattened",
+          "what": "Class method signatures and top-level signatures end up in the same chaseSignatures list, concatenated after top-level extraction",
+          "why": [
+            "Top-level signatures come from DeclSignature; class method signatures come from the Labeled list inside DeclClass's body.",
+            "The two streams are disjoint in idiomatic PureScript because methods live inside the class block, never at the top level.",
+            "Flattening into one list matches the chase output contract: invariants attach to signatures by name regardless of whether the signature is a top-level binding or a class method.",
+            "A name collision between a top-level signature and a class method of the same name would cause both Signatures to be present, and an invariant for that name would attach to whichever one the renderer encounters first. This is rare enough that no extra disambiguation has been added."
+          ],
+          "affects": ["extractStructure", "extractSignature", "extractClassMethods"]
+        },
+        {
+          "name": "SelfReferencesFilteredAtExtractionTime",
+          "what": "valueBindingRefs filters out references to the binding's own name (recursion) before returning; this is the symmetric counterpart to Chase.Coverage.buildTestIndex's self-loop filter in Haskell mode",
+          "why": [
+            "Recursive helpers like 'go n = if n <= 0 then [] else go (n - 1)' would otherwise report 'go tested by: TestModule.go', which is uninformative noise.",
+            "In Haskell mode the filter lives in Chase.Coverage.buildTestIndex because the parser (Chase.Parse.Haskell) exposes the raw AST and Chase.Coverage does its own walk. In PureScript mode the equivalent walk happens inside this module via scanTestBindings, so the filter is placed at the natural site of the walk.",
+            "Either layer would produce the same observable behavior. The choice is determined by which module owns the AST traversal."
+          ],
+          "affects": ["valueBindingRefs"]
+        }
+      ],
+      "openIssues": [
+        {
+          "name": "InstanceChainTailIgnored",
+          "what": "DeclInstanceChain extracts only the first instance head; subsequent 'else instance' clauses produce no chase output",
+          "why": [
+            "DeclInstanceChain wraps a Separated InstanceHead, where the head is the first instance and the tail is the list of 'else instance' clauses. The pattern 'CST.Separated h _' in extractDataDecl discards the tail.",
+            "For an instance chain like 'instance fooString :: Foo String where ... else instance fooDefault :: Foo a where ...', only fooString shows up as a data decl. The default fallback case is invisible in chase output.",
+            "Fix is straightforward: iterate the Separated tail and emit one head-only ChaseDataDecl per element. The reason it hasn't been done is that no cheeblr file currently uses else-instance chains, so the gap hasn't bitten."
+          ],
+          "blocking": ["complete structural picture for type classes that use else-instance overlap"],
+          "affects": ["extractDataDecl"]
+        },
+        {
+          "name": "DeclRoleAndKindSignatureProduceNoOutput",
+          "what": "DeclRole and DeclKindSignature are recognized by declStartLine (so they bound neighboring decls' line ranges correctly) but no extractor handles them; they vanish from chase output",
+          "why": [
+            "Standalone kind signatures are increasingly used in modern PureScript and carry the same kind of type-level declaration information that DeclSignature carries for values. Losing them means the chase output for a module that uses 'type role'-style or 'kindsignature'-style declarations is missing structural context that the LLM would benefit from.",
+            "Role declarations are rarer; their absence from chase output is less material.",
+            "Fix: add a chaseKindSignatures field (or fold into chaseSignatures with a marker) and an extractor that pulls the verbatim text plus the type name. Requires a small addition to Chase.Types and Chase.Render."
+          ],
+          "blocking": ["chase output completeness for modules that use standalone kind signatures or role annotations"],
+          "affects": ["extractStructure", "declStartLine"]
+        },
+        {
+          "name": "OperatorNamesNotCollectedAsRefs",
+          "what": "collectFromExpr returns no ref for ExprOpName; operator-position uses in test code do not produce TestRefs against operator-form Signatures in source modules",
+          "why": [
+            "ExprOpName represents a reference to an operator at name-position (e.g. inside backticks or as an operator argument). Capturing it would require matching the qualified operator name against operator-form Signature names, which chase represents as parenthesized text in sigName.",
+            "Most PureScript operators come from Prelude or library code, not the same module under test. The signal-to-noise ratio of matching ExprOpName against same-module operator declarations is low.",
+            "ExprInfix DOES walk the operator sub-expression because the CST wraps it as a full Expr (the embedded form, not the name-only form). Tests that use backtick-style infix application will produce a TestRef for the identifier."
+          ],
+          "blocking": ["coverage attribution for operator-only call sites"],
+          "affects": ["collectFromExpr"]
+        },
+        {
+          "name": "ClassMethodSignaturesAreFirstLineOnly",
+          "what": "toMethodSig slices only the first line of a method signature; multi-line method types lose their continuation lines in sigVerbatim",
+          "why": [
+            "The CST does carry the full Labeled-of-Ident-and-Type structure, so the type is available. The reason the verbatim text comes from the first source line instead of from a Type pretty-printer is that pretty-printing produces a normalized form which doesn't match the author's original formatting.",
+            "For single-line method sigs (the common case) the first-line slice is exact. For multi-line types it drops the continuation, leaving a truncated signature in chase output.",
+            "Two paths to fix: (a) extend toMethodSig to slice from the method's name-token line down to the last line of its type's SrcSpan, or (b) use the Type pretty-printer and accept the normalized form. Option (a) is more faithful and is the natural next step."
+          ],
+          "blocking": ["chase output fidelity for class methods with multi-line type signatures"],
+          "affects": ["toMethodSig"]
+        }
+      ],
+      "invariants": {
+        "parseSourceFile": {
+          "intent": "Parse a .purs file via the vendored CST library and return a ChaseFile or a ParseFailure",
+          "effects": ["IO"],
+          "notes": [
+            "delegates the actual parsing to parseCstFile",
+            "on success, runs extractStructure to build the ChaseFile",
+            "ParseFailure is now a real syntactic-parse failure, not just an IO failure as it was under the previous line-scanner architecture"
+          ],
+          "consumes": [
+            "Chase.Parse.parseSourceFile (the dispatcher invokes this for .purs files)"
+          ]
+        },
+        "scanTestBindings": {
+          "intent": "Parse a .purs file and return the module name plus one (function name, line, [referenced names]) entry per top-level value binding",
+          "effects": ["IO"],
+          "notes": [
+            "parallel in shape to Chase.Coverage.parseHaskellTestFile but lives in Chase.Parse.PureScript because the reference walk is naturally an AST traversal over the CST",
+            "only DeclValue declarations produce entries; signatures, foreigns, datas, classes, instances, derives, fixities, kindsignatures, and roles all return Nothing",
+            "the [referenced names] list is deduplicated via nub and has the binding's own name filtered out (recursion is not a self-test, per decision SelfReferencesFilteredAtExtractionTime)",
+            "Chase.Coverage.parsePureScriptTestFile is the direct consumer; whether the pipeline actually routes .purs paths through it is gated by Chase.Pipeline.buildTestIndexOrEmpty (still .hs-only at the time of writing; see open issue PureScriptCoverageNotWiredAtPipeline in Chase.Coverage)"
+          ],
+          "consumes": [
+            "Chase.Coverage.parsePureScriptTestFile (single direct caller; the Pipeline routing is the gate, not this function)"
+          ]
+        },
+        "parseCstFile": {
+          "intent": "Read the file, lex and parse it via the vendored CST library, return (sourceText, Module) or a ParseFailure",
+          "effects": ["IO"],
+          "notes": [
+            "reads via TIO.readFile inside a SomeException catch; IO failures become ParseFailures with a 'read failed: ' prefixed message",
+            "parses in two stages per decision TwoStageParseViaResFull: PSParser.parseModule on the lexed token stream, then resFull on the partial result to resolve layout",
+            "either stage produces a NonEmpty CSTErr.ParserError on failure; both error lists are formatted identically by renderParserErrors and surfaced as ParseFailure",
+            "no fallback or recovery: a partial parse is discarded if either stage errors out"
+          ],
+          "consumes": [
+            "Chase.Parse.PureScript.parseSourceFile",
+            "Chase.Parse.PureScript.scanTestBindings"
+          ]
+        },
+        "renderParserErrors": [
+          "formats a NonEmpty list of CST ParserErrors as a multi-line Text suitable for inclusion in a ParseFailure message",
+          "delegates per-error formatting to CSTErr.prettyPrintError; chase does not customize the wording",
+          "joins messages with newline plus two-space indent so multi-error output stays readable when chase prints the WARN block"
+        ],
+        "extractStructure": [
+          "produces a ChaseFile from a parsed CST.Module by computing declRanges once and then running per-field extractors over those ranges",
+          "chaseSignatures is the concatenation of top-level signatures (extractSignature) and class method signatures (extractClassMethods), per decision ClassMethodsAndTopLevelSigsAreFlattened",
+          "chaseForeignImports comes from DeclForeign blocks via extractForeignImport",
+          "chaseDataDecls covers DeclData, DeclType, DeclNewtype, DeclClass, DeclInstanceChain, and DeclDerive via extractDataDecl",
+          "chaseFixities comes from DeclFixity via extractFixity",
+          "constants/invariants/decisions/topologies are left empty; populated later by Chase.Pipeline.attachAnnotations",
+          "chaseTestCoverage stays Nothing; coverage attachment happens later via Chase.Coverage.attachCoverage"
+        ],
+        "extractTestBindings": [
+          "maps over modDecls with valueBindingRefs and uses mapMaybe to drop non-value declarations silently",
+          "result is one (fnName, startLine, [refs]) tuple per top-level DeclValue"
+        ],
+        "valueBindingRefs": [
+          "matches only DeclValue; returns Nothing for every other declaration kind",
+          "the function name is extracted from CST.valName via identText; the line is the start line of the name token",
+          "refs are gathered by collectValueBindingRefs, deduplicated via nub, then the binding's own name is filtered out",
+          "this is the layer at which recursion is dropped from coverage analysis; see decision SelfReferencesFilteredAtExtractionTime"
+        ],
+        "extractImport": [
+          "returns the dotted module name via N.runModuleName",
+          "appends ' as Alias' when impQual is set; the alias itself is the runModuleName of the qualified name",
+          "explicit name lists (the parenthesized export list of an import) are not present in this output, so Chase.Render.collapseImport in the renderer has nothing to strip from PureScript imports"
+        ],
+        "extractSignature": [
+          "produces a Signature only for DeclSignature; returns Nothing for every other declaration kind",
+          "sigVerbatim is the full source span of the declaration via sliceLines from startL to endL",
+          "sigSrcLine is the start line; sigName is the identifier from the Labeled wrapper"
+        ],
+        "extractClassMethods": [
+          "produces zero or more Signatures from the methods of a DeclClass",
+          "the methods field is Maybe (SourceToken, NonEmpty Method); Nothing means a class declared without a 'where' block (abstract / no methods), and produces []",
+          "each method goes through toMethodSig; the resulting Signatures are flattened into chaseSignatures alongside top-level signatures"
+        ],
+        "toMethodSig": [
+          "extracts the method name and line from the Labeled (Name Ident) Type wrapper",
+          "sigVerbatim is the FIRST line only, stripped of leading whitespace, so the method reads as 'name :: Type' even though it was indented under the class",
+          "multi-line method types lose their continuation lines; see open issue ClassMethodSignaturesAreFirstLineOnly"
+        ],
+        "extractForeignImport": [
+          "handles all three foreign-import forms produced by the CST: ForeignValue, ForeignData, and ForeignKind",
+          "ForeignValue: name is the value identifier via identText",
+          "ForeignData: name is the type ProperName via runProperName",
+          "ForeignKind: name is the kind ProperName via runProperName (rare; PureScript moved to first-class kinds, so this form is mostly legacy)",
+          "sigVerbatim is the full source span; sigSrcLine is the start line"
+        ],
+        "extractDataDecl": [
+          "DeclData, DeclType, DeclNewtype: full source span via sliceLines; name is the dataHdName from the data head as a ProperName",
+          "DeclClass: head-only via sliceFirstLine; name is clsName from the class head",
+          "DeclInstanceChain: head-only; name is the class name from the FIRST instance head's qualName; subsequent 'else instance' clauses are silently dropped (see open issue InstanceChainTailIgnored)",
+          "DeclDerive: head-only; name is the class name from the instance head's qualName",
+          "every other declaration kind returns Nothing"
+        ],
+        "extractFixity": [
+          "produces a Fixity entry for DeclFixity only",
+          "handles both FixityValue (alias for a value-level identifier) and FixityType (alias for a type-level identifier)",
+          "the operator name is extracted via runOpName from the Name wrapper inside FixityOp",
+          "verbatim is the first line only; multi-line fixity declarations are not idiomatic in PureScript",
+          "fixOps always has exactly one element; the previous parser sometimes inferred multiple operator names per fixity block, but the CST gives one operator per DeclFixity by construction"
+        ],
+        "collectValueBindingRefs": [
+          "dispatches on the Guarded constructor of valGuarded: Unconditional walks the Where directly; Guarded walks each GuardedExpr",
+          "produces a duplicated [Text]; deduplication happens at the caller (valueBindingRefs)"
+        ],
+        "collectFromWhere": [
+          "collects refs from the main expression and from every let-binding in the where-clause",
+          "refs from the where-binding bodies are flattened into the same list as the expression refs; chase output does not distinguish body refs from where-clause refs"
+        ],
+        "collectFromGuardedExpr": [
+          "collects refs from each pattern guard's condition expression and from the guard's associated Where",
+          "PatternGuard binders on the LHS of an arrow are not collected (patterns introduce names; they do not reference them)"
+        ],
+        "collectFromPatternGuard": [
+          "returns the refs in the guard's expression; the pattern, if any, is ignored",
+          "matches the Haskell mode behavior in Chase.Coverage.collectVarsIn (constructor patterns are not refs)"
+        ],
+        "collectFromLetBinding": [
+          "LetBindingSignature: returns [] (a type signature on a let binding does not execute)",
+          "LetBindingName: recurses via collectValueBindingRefs on the value binding fields",
+          "LetBindingPattern: walks the where-clause RHS; the pattern itself is ignored"
+        ],
+        "collectFromExpr": [
+          "ExprIdent: emits the qualified name via identText; this is the primary signal that drives test-coverage attribution",
+          "ExprConstructor: returns [] (constructor references are not function-coverage refs)",
+          "ExprOpName: returns [] (see open issue OperatorNamesNotCollectedAsRefs)",
+          "ExprInfix: walks both operands AND the operator sub-expression (which is itself a full Expr); a backtick infix call contributes the identifier as a ref",
+          "ExprOp: walks both operands but NOT the operator name (the operator comes through as ExprOpName)",
+          "ExprVisibleTypeApp: drops the type argument; type-level references are not tracked",
+          "ExprLambda: walks the body; lambda parameter patterns are not refs (they introduce names)",
+          "ExprCase: walks every scrutinee in the case head and the RHS of each branch via collectFromGuarded; LHS patterns are not refs",
+          "ExprLet: walks every let-binding and the body expression",
+          "ExprDo and ExprAdo: walk every DoStatement; ExprAdo additionally walks the trailing result expression",
+          "ExprRecordAccessor: walks the underlying expression; the field label is not a ref",
+          "all literal constructors (Boolean, Char, String, Number, Hole, Section) return []"
+        ],
+        "collectFromRecordLabeled": [
+          "RecordPun: emits the punned identifier as a ref, since '{ foo }' is sugar for '{ foo: foo }' and the second 'foo' is a real reference",
+          "RecordField: recurses into the field's expression; the label itself is not a ref"
+        ],
+        "collectFromRecordUpdate": [
+          "RecordUpdateLeaf: walks the new value expression",
+          "RecordUpdateBranch: walks the inner nested updates recursively"
+        ],
+        "collectFromGuarded": [
+          "same shape as the top-level Guarded dispatch in collectValueBindingRefs, kept as a separate helper because case branches reuse the Guarded type"
+        ],
+        "collectFromDoStatement": [
+          "DoLet: walks all let-bindings via collectFromLetBinding",
+          "DoDiscard: walks the bare expression-statement",
+          "DoBind: walks the RHS expression only; the LHS pattern is ignored"
+        ],
+        "delimitedToList": [
+          "flattens a Wrapped (Maybe (Separated a)) into a plain list",
+          "empty delimited (e.g. '[]' or '{}') yields []"
+        ],
+        "delimitedNonEmptyToList": [
+          "flattens Wrapped (Separated a) where the inner Separated must have at least one element by construction",
+          "never returns []"
+        ],
+        "sepToList": [
+          "Separated has shape (head, [(separator, element)])",
+          "returns hd : map snd tl; the separator tokens are discarded"
+        ],
+        "declRanges": [
+          "assigns each declaration a (startLine, endLine) pair using the start line of the NEXT declaration minus 1 as the end line",
+          "the last declaration's end is totalLines (the file's full line count)",
+          "max startL (nextStart - 1) guards against the degenerate case of two declarations sharing a start line; the earlier one gets a zero-width range rather than a backwards range"
+        ],
+        "declStartLine": [
+          "extracts the start line of every Declaration constructor variant",
+          "DeclRole and DeclKindSignature are recognized so the range computation doesn't crash; their content produces no chase output (see open issue DeclRoleAndKindSignatureProduceNoOutput)",
+          "the start line comes from the declaration's leading keyword token; for DeclValue and DeclSignature it comes from the name token instead"
+        ],
+        "sliceLines": [
+          "1-indexed inclusive slice over a [Text]",
+          "tolerates out-of-bounds startL by clamping the offset to max 0 (startL - 1); a negative or zero startL produces output from the file head",
+          "drops trailing blank lines via dropWhile + reverse before joining, so the verbatim block doesn't carry whitespace between adjacent declarations",
+          "intermediate blank lines (between non-blank lines inside the slice) are preserved"
+        ],
+        "sliceFirstLine": [
+          "returns ONLY the line at startL (1-indexed); returns the empty Text if startL is past the file length",
+          "used for head-only renderings (class, instance, derive, fixity, class method sig)"
+        ],
+        "moduleName": [
+          "extracts the module's namespace name as a dotted-Text via N.runModuleName on modNamespace"
+        ],
+        "identText": [
+          "thin alias for CST.getIdent",
+          "exists as a separate helper so the rest of the file uses identText uniformly regardless of how the vendored CST library exposes the conversion"
+        ],
+        "tokenLine": [
+          "returns the 1-indexed start line of any SourceToken",
+          "peels through tokAnn -> tokRange -> srcStart -> srcLine"
+        ]
+      }
+    },
+
+    "Chase.Render": {
+      "decisions": [
+        {
+          "name": "OneLineFactsForLLMScannability",
+          "what": "Every annotation renders as one line per fact, indented two spaces under the signature it describes",
+          "why": [
+            "The audience is an LLM working under a context budget. Multi-line wrapped paragraphs hide structure and waste tokens.",
+            "Sigils (! invariant, > consumed-by, ? coverage) let the model retrieve facts by category without parsing prose.",
+            "Indentation under the signature attaches each fact to its function unambiguously, even when many functions share a module."
+          ],
+          "affects": ["renderSignaturesWithInvariants", "renderConstants", "renderDecisions", "renderCoverage"]
+        },
+        {
+          "name": "ImportsCollapseAndDropNames",
+          "what": "Each import becomes one line; the explicit name list inside parens is dropped",
+          "why": [
+            "The LLM does not benefit from knowing you imported (sort, nub) specifically; it benefits from knowing you imported Data.List.",
+            "Multi-line imports with long name lists are the single biggest source of wasted tokens in raw Haskell source."
+          ],
+          "affects": ["renderImports", "collapseImport"]
+        },
+        {
+          "name": "CoverageIsSuppressedWhenNotAnalyzed",
+          "what": "If chaseTestCoverage is Nothing, no ? lines are emitted anywhere; if Just <list>, every signature/foreign/pattern gets a ? line",
+          "why": [
+            "The Nothing -> silent rule keeps structure-only output clean for users who don't pass a test root.",
+            "The Just -> always-emit rule (including 'no test references' for empty entries) is the useful surface: gaps are what the user cares about. Silencing 'no test references' would hide the most actionable information.",
+            "The Maybe lives on ChaseFile so the renderer is fully driven by data, no flag plumbing through the helper functions."
+          ],
+          "affects": ["renderCoverage", "renderSig"]
+        }
+      ],
+      "invariants": {
+        "renderChaseFile": [
+          "fixed top-down order: header, %ext, %fixity, %uses, %const, %topology, data decls, %foreign, patterns, signatures, %decision, %open_issue, parse errors",
+          "the order is a contract: it is what an LLM trained or prompted on the chase format will expect to see",
+          "swapping any two top-level sections is a breaking change to the format",
+          "the %foreign section is rendered only for non-empty chaseForeignImports (PureScript) and is omitted for Haskell files (which leave that field empty)"
+        ],
+        "renderImports": [
+          "drops the leading 'import' keyword (every line starts with the module name)",
+          "filters out any import that collapses to empty (defensive)"
+        ],
+        "collapseImport": [
+          "ORDER: words+unwords to flatten newlines, takeWhile (/= '(') to drop name list, strip the 'import ' prefix",
+          "qualified imports keep the 'qualified Foo as F' shape because everything before '(' is preserved"
+        ],
+        "renderConstants": [
+          "notes are joined with '; ' on the same line as the constant",
+          "BUG notes get a 'BUG: ' prefix; plain notes render verbatim"
+        ],
+        "renderForeignImports": {
+          "notes": [
+            "emits a '%foreign' header line, then one block per Signature using the same renderSig helper as top-level signatures",
+            "empty input -> empty output (no header)",
+            "coverage attaches to foreign imports the same way it does to top-level signatures; the ? line appears under each foreign import when coverage is enabled"
+          ],
+          "consumes": [
+            "Chase.Render.renderChaseFile (single caller; the renderer is the only thing that knows the %foreign section exists)"
+          ]
+        },
+        "renderPatternsWithInvariants": [
+          "renders each pattern synonym with its invariant (if any) and coverage line (if enabled)",
+          "empty input -> empty output (no header is emitted; patterns just appear in sequence with signatures)"
+        ],
+        "renderSignaturesWithInvariants": {
+          "notes": [
+            "ORDER per signature: signature verbatim, then '!' lines (invariants), then '>' lines (consumed by), then optional hint, then '?' line (coverage if enabled), then blank line",
+            "if a signature has no matching invariant and coverage is disabled, only the signature and a blank line are emitted",
+            "the lookup is by exact sigName match; case-sensitive"
+          ],
+          "consumes": [
+            "any LLM consumer of chase output relies on this ordering to distinguish facts from consumer pointers from coverage hints"
+          ]
+        },
+        "renderSig": [
+          "internal helper shared by renderSignaturesWithInvariants and renderForeignImports",
+          "produces one signature block: verbatim + invariant lines + consumed-by lines + body hint + coverage line + blank",
+          "the order is fixed and is the visual contract for LLM consumers"
+        ],
+        "renderCoverage": [
+          "Nothing -> [] (no coverage analysis ran; emit nothing)",
+          "Just covMap with no entry for the name -> [] (defensive; should not happen because attachCoverage populates every name)",
+          "Just covMap with empty refs -> ['  ? no test references']",
+          "Just covMap with refs -> ['  ? tested by: M1.f1, M2.f2, ...'] (single line, comma-joined)"
+        ],
+        "renderTestRef": [
+          "formats a single TestRef as '<module>.<function>'",
+          "line numbers are dropped from the rendered output; they're retained in the TestRef value for any future use"
+        ],
+        "renderDecisions": [
+          "each decision renders as four lines: %decision <name>, what:, why:, affects:",
+          "why and affects are forced onto a single line each (Decision.decWhy is already collapsed by the JSON parser; affects is comma-joined here)"
+        ],
+        "renderParseErrors": [
+          "leads with a blank line so parse errors do not visually adjoin the last decision",
+          "rendered ONLY in per-file output; runBundled emits its own per-file %parse_error block instead"
+        ]
+      }
+    },
+
+    "Chase.Pipeline": {
+      "decisions": [
+        {
+          "name": "AttachReplacesNotMerges",
+          "what": "attachAnnotations OVERWRITES chaseConstants/chaseInvariants/chaseDecisions/chaseTopologies from the matching ModuleAnnotations",
+          "why": [
+            "Today the parser never populates these four fields, so 'replace' and 'merge' are observationally identical.",
+            "If a future parser pass extracts annotations from source comments (e.g. via Haddock-style markup), this becomes a real choice. Replace is the safer default: the JSON file is the source of truth and merging would silently combine two notions of 'invariant'.",
+            "Anyone adding parser-side extraction must change this function deliberately, not have the merge happen by accident."
+          ],
+          "affects": ["attachAnnotations"]
+        },
+        {
+          "name": "DriftCheckerScopeIsLocal",
+          "what": "checkAnnotationDrift validates invariant function names and decision/open-issue affects names against the SAME file's signatures, foreign imports, and patterns only",
+          "why": [
+            "Cross-module drift checking would require gathering all signatures across all parsed files before checking any single file. That is a bigger restructuring (two-pass pipeline) and the current single-pass design is simpler.",
+            "consumes entries are deliberately NOT drift-checked: they are free-text pointers, often qualified or descriptive ('Server.Admin.buildSessionInfos via SessionInfo.siLastSeen'), and validating them would require parsing the consumer module too.",
+            "Open-issue blocking entries are also not drift-checked: they commonly name downstream services or features rather than functions in the same module.",
+            "The result is that consumes and blocking entries can rot silently. Documented in the README as a known limitation."
+          ],
+          "affects": ["checkAnnotationDrift"]
+        },
+        {
+          "name": "CoverageIndexIsBuiltOnce",
+          "what": "buildTestIndexOrEmpty parses every test file once before the source pass begins; the resulting TestRefIndex is shared by every source file",
+          "why": [
+            "Coverage attribution is global: a test in test/AuthSpec.hs referencing 'lookupSession' attaches to whichever source file defines lookupSession (modulo the documented UnqualifiedNameMatching limitation).",
+            "Parsing test files per source-file would be O(sources * tests); parsing once and indexing is O(sources + tests).",
+            "If cfgTestRoots is empty, this function returns Map.empty immediately and never touches the filesystem.",
+            "A test file that fails to parse prints a warning and contributes zero TestBindings; the rest of the index is unaffected, so coverage analysis degrades gracefully."
+          ],
+          "affects": ["buildTestIndexOrEmpty", "applyPasses"]
+        }
+      ],
+      "openIssues": [
+        {
+          "name": "TestRootsFilteredToHaskellOnly",
+          "what": "buildTestIndexOrEmpty filters cfgTestRoots files to takeExtension == '.hs' before dispatching, so .purs test files never reach parseTestFile and PureScript test coverage is dead code at the pipeline layer",
+          "why": [
+            "Chase.Coverage.parsePureScriptTestFile exists and is correct; the gap is here, not there.",
+            "Lifting the filter requires three small decisions: which TestRef.trModule to use when a PureScript test references an unqualified name that also exists in Haskell, whether the index should be split per-language or shared, and whether the renderer should distinguish cross-language matches in the ? line.",
+            "None of these are hard, but they have not been made yet, and silently shipping .purs scanning without an answer would produce confusing coverage attribution."
+          ],
+          "blocking": ["test-coverage analysis for PureScript modules"],
+          "affects": ["buildTestIndexOrEmpty"]
+        }
+      ],
+      "invariants": {
+        "defaultConfig": [
+          "all fields default to empty/Nothing/False",
+          "callers override via record syntax; no Reader monad, no env vars",
+          "cfgTestRoots defaults to []; coverage analysis is OFF by default"
+        ],
+        "runChase": [
+          "builds the test index FIRST (one pass over all test files), then dispatches to runPerFile or runBundled with the index in hand",
+          "the order matters: source-file parsing depends on the index, so it must exist before the source pass",
+          "dispatches on cfgBundleFile: Nothing means per-file mode, Just means bundle mode"
+        ],
+        "buildTestIndexOrEmpty": {
+          "intent": "Parse every .hs file under cfgTestRoots and build the global ref index; return Map.empty if cfgTestRoots is empty",
+          "effects": ["IO"],
+          "notes": [
+            "filters cfgTestRoots files by takeExtension == '.hs'; .purs is NOT scanned at the pipeline layer even though Chase.Coverage.parsePureScriptTestFile would handle it (see open issue TestRootsFilteredToHaskellOnly)",
+            "uses findSourceFiles for the recursive walk; same code path as source roots, so the same .hs/.purs filter is in effect, but we re-filter to .hs only at this level",
+            "test file parse failures print a warning and contribute zero bindings; the overall run continues",
+            "prints 'test roots:', 'scan <path>', and 'index <N> distinct names' lines when cfgVerbose"
+          ],
+          "consumes": [
+            "Chase.Pipeline.runChase (only caller)"
+          ]
+        },
+        "runPerFile": {
+          "notes": [
+            "writes one .chase file per source file, mirroring the directory tree under cfgOutputDir",
+            "parse failures are printed but NOT counted; success and failure are visually mixed in stdout",
+            "drift warnings are printed inline as files are processed",
+            "coverage is attached via applyPasses; the rendered output includes ? lines iff cfgTestRoots was non-empty"
+          ],
+          "consumes": [
+            "Chase.Pipeline.runChase when cfgBundleFile is Nothing"
+          ]
+        },
+        "runBundled": {
+          "intent": "Concatenate all module skeletons into one file with a counted preamble",
+          "effects": ["IO"],
+          "notes": [
+            "successesRef and failuresRef are IORef counters used in the preamble",
+            "ORDER: parse all files first (collecting blocks and counts), THEN render the preamble, THEN write everything in one TIO.writeFile",
+            "this means the preamble counters are accurate at write time even though the preamble appears first in the file",
+            "coverage is attached via applyPasses; rendered ? lines appear in each bundle block iff cfgTestRoots was non-empty"
+          ],
+          "consumes": [
+            "Chase.Pipeline.runChase when cfgBundleFile is Just"
+          ]
+        },
+        "applyPasses": [
+          "composes attachAnnotations and (conditionally) Chase.Coverage.attachCoverage",
+          "attachCoverage runs only when cfgTestRoots is non-empty; otherwise the ChaseFile leaves with chaseTestCoverage = Nothing and the renderer emits no ? lines",
+          "the order is fixed: annotations first, coverage second. Coverage attachment iterates chaseSignatures/chaseForeignImports/chasePatterns, all of which are populated by parsing (not by annotations), so the order doesn't matter for correctness but is fixed for predictability"
+        ],
+        "attachAnnotations": {
+          "intent": "Merge a ModuleAnnotations into a parsed ChaseFile by module name lookup",
+          "notes": [
+            "no-op if the module name is not in the annotation map",
+            "REPLACES the four annotation fields rather than merging (see decision AttachReplacesNotMerges)"
+          ],
+          "consumes": [
+            "Chase.Pipeline.applyPasses (every parsed file passes through here)"
+          ]
+        },
+        "checkAnnotationDrift": {
+          "intent": "Find invariants, decision affects, and open-issue affects that reference functions not present in the file",
+          "notes": [
+            "validNames pool = chaseSignatures ++ chaseForeignImports ++ chasePatterns; foreign imports are in scope for drift checking so PureScript foreign import annotations don't false-positive",
+            "checks invariant function names against the validNames pool",
+            "checks decision affects names against the validNames pool",
+            "checks open-issue affects names against the validNames pool",
+            "does NOT check consumes entries or open-issue blocking entries (cross-module, free-text, deliberately out of scope)",
+            "returns a list of warning messages; never throws"
+          ],
+          "consumes": [
+            "Chase.Pipeline.runPerFile, Chase.Pipeline.runBundled (warnings printed to stdout per file)",
+            "Chase.GraceBridge.generateWithDriftFeedback (drives the LLM-side feedback loop by folding these warnings into the next grace prompt)"
+          ]
+        },
+        "mkOutputPath": [
+          "drops the source extension (.hs or .purs) via dropExtension, adds .chase, places under cfgOutputDir mirroring the relative path under cfgSourceRoots"
+        ],
+        "relativeToRoots": [
+          "uses the FIRST matching root; if a file lives under multiple roots, the order in cfgSourceRoots wins",
+          "if no root matches (file is outside any source root), returns the absolute path unchanged"
+        ],
+        "findSourceFiles": [
+          "recursive directory walk, sorted entries (Data.List.sort)",
+          "filters by takeExtension in ('.hs', '.purs'); .lhs and .hsc are NOT included",
+          "non-existent root returns empty list (silent); does not warn",
+          "the returned list mixes both languages in alphabetical order; Chase.Parse.parseSourceFile handles per-file dispatch",
+          "also used by buildTestIndexOrEmpty for the test-root walk; the .hs filter is re-applied at the caller for the test path"
+        ]
+      }
+    },
+
+    "Chase.Annotations.Json": {
+      "decisions": [
+        {
+          "name": "SilentVsLoudFileMissing",
+          "what": "loadAnnotationsIfExists returns empty on missing/malformed files; loadAnnotations returns Left",
+          "why": [
+            "The CLI uses loadAnnotations so that an explicit --annotations path with a typo fails loudly (you asked for it, you should know it failed).",
+            "Library callers wanting 'use annotations if present, else don't bother' get loadAnnotationsIfExists.",
+            "Mixing the two semantics into one function with a Bool flag was the obvious alternative; two functions with self-documenting names won."
+          ],
+          "affects": ["loadAnnotations", "loadAnnotationsIfExists"]
+        },
+        {
+          "name": "InvariantValueIsSumOfArrayOrObject",
+          "what": "JSON invariant values are EITHER a flat array of strings OR an object with structured fields",
+          "why": [
+            "The flat-array form keeps trivial annotations terse: ['line 1', 'line 2'] is enough when there are no specs, no consumes, no intent worth distinguishing.",
+            "The object form is for invariants with structure: intent, effects, notes, spec, consumes, hint.",
+            "A single uniform schema (always object) would force visual noise on the common case. A single uniform schema (always array) would force string-encoding tricks for the structured case.",
+            "Other JSON types (number, bool, null) are explicit parse errors with the function name in the message."
+          ],
+          "affects": ["parseInvariantValue", "parseObjectInvariant"]
+        },
+        {
+          "name": "VersionFieldIsForwardCompatibility",
+          "what": "Top-level 'version' field; only version 1 is currently accepted",
+          "why": [
+            "Version-on-write costs nothing and makes any future breaking change a one-line check rather than a guess-the-shape exercise.",
+            "Default value when absent is 1 (treats unversioned files as version 1) so existing files don't need to be touched."
+          ],
+          "affects": ["parseRoot"]
+        }
+      ],
+      "invariants": {
+        "loadAnnotations": {
+          "intent": "Read and parse a JSON annotations file, returning a path-prefixed error message on failure",
+          "effects": ["IO"],
+          "notes": [
+            "missing file returns Left, NOT empty",
+            "Aeson decode errors and parser errors are both surfaced as Left with the path prefixed (so error output is useful at the CLI)"
+          ],
+          "consumes": [
+            "app/Main.hs loadAnnotationsOrDie (calls exitFailure on Left)"
+          ]
+        },
+        "loadAnnotationsIfExists": {
+          "intent": "Best-effort load; missing or malformed file becomes empty Map, not an error",
+          "effects": ["IO"],
+          "notes": [
+            "use this in library contexts where 'no annotations' is a valid runtime state",
+            "swallows parse errors silently; if you want diagnostics, use loadAnnotations"
+          ]
+        },
+        "parseRoot": [
+          "version defaults to 1 if absent; any other version fails with 'unsupported annotations version: N'",
+          "modules object is required; absent or wrong-typed produces an Aeson parse error"
+        ],
+        "parseModulesMap": [
+          "iterates the JSON object's KeyMap; preserves keys EXACTLY as written via Key.toText (case-sensitive, no normalization)",
+          "the resulting Map Text ModuleAnnotations is keyed by the literal JSON string; lookup in Chase.Pipeline.attachAnnotations must match exactly or it no-ops silently"
+        ],
+        "parseModule": [
+          "all five annotation lists (constants, invariants, decisions, openIssues, topologies) are OPTIONAL",
+          "an empty module entry produces a ModuleAnnotations with all-empty fields, which then attaches as a no-op in the pipeline"
+        ],
+        "parseConstant": [
+          "name and value are required; notes is optional"
+        ],
+        "noteFromText": [
+          "the 'BUG: ' prefix MUST include the trailing space; 'BUG:foo' (no space) is treated as a plain Note, not a BugNote",
+          "this is intentional: it disambiguates accidental colons in note text"
+        ],
+        "parseInvariantsMap": [
+          "iterates the JSON object's KeyMap; key order is whatever Aeson decoded order is (typically insertion order in modern aeson)",
+          "the renderer does not re-sort; invariants appear in JSON object order, attached to signatures in source order"
+        ],
+        "parseInvariantValue": [
+          "Array: parsed as [Text], wrapped via the inv smart constructor (no consumes, no hint)",
+          "Object: passed to parseObjectInvariant which assembles a structured Invariant",
+          "anything else: parser error with the function name and the expected shapes"
+        ],
+        "parseObjectInvariant": {
+          "notes": [
+            "ORDER of assembled invLines: intent line, effects line, notes (verbatim), spec entries (rendered)",
+            "consumes is NOT in invLines; it goes into invConsumes and renders separately with the > sigil",
+            "hint is NOT in invLines; it goes into invBodyHint and renders after both ! and > lines",
+            "all six fields are optional; an empty object produces an Invariant with empty lns and consumes"
+          ],
+          "consumes": [
+            "Chase.Render.renderSignaturesWithInvariants (the renderer is the only consumer that distinguishes the four output streams)"
+          ]
+        },
+        "renderSpec": [
+          "renders one SpecEntry as 'spec: <input> => <expected>' on a single line",
+          "no escaping; spec strings are written into invLines verbatim"
+        ],
+        "parseDecision": [
+          "name, what required; affects defaults to empty",
+          "why accepts string OR array of strings",
+          "array form is joined with a single space (NOT a separator like '; ' or '. ') so authors should include their own punctuation if they want sentence breaks"
+        ],
+        "parseOpenIssue": [
+          "name, what required; blocking and affects both default to empty",
+          "why accepts string OR array of strings, same semantics as parseDecision",
+          "shape mirrors parseDecision exactly except for the additional blocking field"
+        ],
+        "parseWhy": [
+          "string -> returned as-is",
+          "array -> joined with a single space",
+          "anything else -> parser error with the context name (e.g. 'decision.why must be a string or array of strings')"
+        ],
+        "parseTopology": [
+          "name, vertices, transitions all required",
+          "transitions is a JSON object: keys are 'from' vertex names, values are arrays of 'to' vertex names",
+          "no validation that transition vertex names appear in the vertices list"
+        ]
+      }
+    },
+
+    "Chase.GraceBridge": {
+      "decisions": [
+        {
+          "name": "BridgeIsASeparateSublibrary",
+          "what": "chase-grace-bridge is a public sublibrary of chase living under src-bridge, not part of the main chase library",
+          "why": [
+            "grace pulls in megaparsec, http-client, openai-servant, and grace's own dependency closure. None of that is needed for chase's deterministic pipeline (parse, render, drift-check).",
+            "Keeping the dep closure split means the chase library and chase executable build cleanly without any LLM-facing or network code. A user who only wants the structural extractor does not pay for grace.",
+            "Replacing grace later, or adding a second backend (a different prompt library, a self-hosted inference server with the same JSON-Schema-driven structured output API) is a change confined to src-bridge plus the chase-annotate executable. Nothing in src/ moves."
+          ],
+          "affects": ["loadGenerator", "generateWithDriftFeedback", "toModuleAnnotations", "mergeForCheck"]
+        },
+        {
+          "name": "GraceTemplateIsExternalized",
+          "what": "The annotation prompt lives in grace/genAnnotations.ffg as a typed Grace function, not as an embedded string literal in this module",
+          "why": [
+            "Grace compiles the function's return type to an OpenAI JSON Schema, which OpenAI uses to validate every response. The model literally cannot return a malformed shape.",
+            "Editing the prompt does not require recompiling Haskell. The Grace file is the prompt; the schema lives in its return type; the bridge just decodes it as a typed Haskell function via FromGrace (a -> IO b).",
+            "Prompt iteration becomes a normal PR: change the .ffg, see what the model produces, adjust. There is no embedded prompt string buried in Haskell that requires a rebuild to tune.",
+            "The Haskell-side record (GenArgs, GenAnnotations, GenInvariant, GenDecision, GenOpenIssue) is the schema mirror. Renaming a Haskell field renames the corresponding grace schema field via Generic.selName, so the two sides stay in sync by construction."
+          ],
+          "affects": ["loadGenerator", "GenArgs", "GenAnnotations"]
+        },
+        {
+          "name": "DriftFeedbackLoopIsBounded",
+          "what": "generateWithDriftFeedback runs Chase.Pipeline.checkAnnotationDrift after each generation pass; non-empty drift warnings get folded into the next grace prompt via the driftWarnings field, up to maxRetries iterations",
+          "why": [
+            "The model can hallucinate any content it wants in the why/what/body fields. Those are content errors that nothing here can catch; the human reviewer catches them at PR time.",
+            "What chase CAN detect is hallucinated names: an invariant attached to a function that does not exist in the bundle, or a decision whose affects list mentions a name the parser never saw.",
+            "When that happens, the warnings get surfaced inline in the next prompt's text via the template's driftSection. The model sees its own previous failure mode and can correct on the next attempt.",
+            "The loop is bounded by maxRetries (default 2) so a model that fundamentally cannot produce drift-clean output still terminates. The final attempt's output is returned alongside the residual drift list; the caller decides whether to write the file anyway and print the warnings, or treat unresolved drift as a hard error.",
+            "The point is hallucination-OF-NAMES elimination, not hallucination elimination. Wrong invariant text still slips through; wrong function names cannot."
+          ],
+          "affects": ["generateWithDriftFeedback"]
+        },
+        {
+          "name": "InvariantFieldRenamedToBody",
+          "what": "GenInvariant has a 'body' field, not a 'lines' field",
+          "why": [
+            "RecordWildCards unpacking a GenInvariant binds the field names as locals. A field named 'lines' shadows Prelude.lines and triggers -Wname-shadowing across every helper that uses the wildcards pattern.",
+            "Renaming the Haskell field to 'body' clears the warning. The grace template must use the same name ('body: List Text' in the schema) because ToGraceType derives the schema field names from the Haskell record's Generic.selName.",
+            "The chase-side rendered output is unaffected: annotationsToJSON in app-annotate writes 'notes' as the JSON key under each invariant, matching chase's existing annotation format. The 'body' field name only appears inside the grace-facing schema."
+          ],
+          "affects": ["GenInvariant", "toModuleAnnotations"]
+        },
+        {
+          "name": "DuplicateRecordFieldsForJsonShape",
+          "what": "The module enables DuplicateRecordFields because GenDecision and GenOpenIssue share name/what/why/affects field names",
+          "why": [
+            "The grace schema mirrors the chase JSON annotation format: decisions and open issues both have {name, what, why, affects} (open issues additionally have blocking).",
+            "Renaming the Haskell fields to disambiguate (decName, decWhat, oiName, oiWhat) would force the grace schema and the output JSON to use the prefixed names, which would mean either (a) the prompt prose ends up writing 'decName' literally or (b) annotationsToJSON has to translate fields, undoing the schema-equals-output property.",
+            "DuplicateRecordFields lets the source-level field selectors collide at top level while RecordWildCards still binds them as locals within the relevant pattern match. The deriving anyclass FromJSON/ToJSON/FromGrace/ToGrace/ToGraceType derivations all consult Generic metadata, which retains the original field names; serialization sees 'name', not '$sel:name:GenDecision'."
+          ],
+          "affects": ["GenDecision", "GenOpenIssue"]
+        }
+      ],
+      "invariants": {
+        "loadGenerator": {
+          "intent": "Decode the grace prompt template at graceTemplate as a typed Haskell function (GenArgs -> IO GenAnnotations)",
+          "effects": ["IO"],
+          "notes": [
+            "calls Grace.Interpret.load with Input value (Path graceTemplate AsCode); AsCode means treat the file contents as a grace expression (not a literal Text payload)",
+            "the resulting function value closes over the grace runtime; each call performs one OpenAI request",
+            "the file is read and parsed once at loadGenerator time; subsequent calls do not re-read it, which means edits to the grace template require restarting chase-annotate",
+            "intended to be called once per chase-annotate run; the returned function is reused across modules"
+          ]
+        },
+        "generateWithDriftFeedback": {
+          "intent": "Drive the typed grace generator against one ChaseFile, folding drift warnings back into successive prompts up to maxRetries times, and return both the final result and the residual drift list",
+          "effects": ["IO"],
+          "notes": [
+            "calls the generator once with driftWarnings = [] (initial attempt), then checks drift via Chase.Pipeline.checkAnnotationDrift against a synthetic ChaseFile produced by mergeForCheck",
+            "if checkAnnotationDrift returns []: stop, return (result, [])",
+            "if checkAnnotationDrift returns warnings AND attempt < maxRetries: call the generator again with driftWarnings = those warnings, increment attempt counter, repeat",
+            "if checkAnnotationDrift returns warnings AND attempt >= maxRetries: stop and return (final-result, final-warnings); the caller prints the warnings to stderr and writes the file anyway",
+            "the loop is finite by construction; even a model that cannot produce drift-clean output terminates after maxRetries iterations",
+            "Chase.GraceBridge does NOT know which OpenAI model is being called; that is decided inside grace/genAnnotations.ffg via the prompt builtin"
+          ],
+          "consumes": [
+            "app-annotate/Main.hs (the chase-annotate executable's main loop)"
+          ]
+        },
+        "toModuleAnnotations": {
+          "intent": "Convert the grace-shaped GenAnnotations record into chase's existing ModuleAnnotations type",
+          "notes": [
+            "annConstants and annTopologies are always [] because the grace template does not produce them; the LLM would need additional schema fields to do so, and constants/topologies are typically not what the model can infer from the structural skeleton alone",
+            "invariants, decisions, and open issues map field-for-field via the helper functions in the where-clause; field-name correspondence is intentional and exact (function->invFunction, body->invLines, etc.)",
+            "this is a pure transformation; no IO and no truncation"
+          ],
+          "consumes": [
+            "Chase.GraceBridge.generateWithDriftFeedback (used to build the synthetic ChaseFile passed to mergeForCheck)",
+            "app-annotate/Main.hs (used to build the final ModuleAnnotations that gets serialized to JSON)"
+          ]
+        },
+        "mergeForCheck": [
+          "internal helper: copies the GenAnnotations -> ModuleAnnotations conversion result onto a parsed ChaseFile so checkAnnotationDrift can run against it",
+          "the resulting ChaseFile is NEVER written or rendered; it exists only to satisfy the drift checker's input shape",
+          "the parsed file's structural fields (chaseSignatures, chaseForeignImports, chasePatterns) are kept as-is, which is what gives the drift checker the valid-names pool to validate against"
+        ]
+      }
+    },
+
+    "Main": {
+      "decisions": [
+        {
+          "name": "AnnotationsAreOptionalNotRequired",
+          "what": "The bare runner produces structure-only output if no annotations file is found; annotations are auto-detected from cwd",
+          "why": [
+            "First-run experience: someone clones chase, runs it on their codebase, gets useful structure-only output without authoring anything.",
+            "Default behavior is 'look for ./chase-annotations.json next to where you ran me'. If found, used. If absent, silent empty.",
+            "An explicitly-passed annotations path that doesn't exist is a hard error (typos in CLI args should fail loudly).",
+            "This matches how compilers handle .ghci, .nixrc, etc: implicit local config is opt-in, explicit paths are mandatory."
+          ],
+          "affects": ["resolveAnnotations", "loadAnnotationsOrDie"]
+        },
+        {
+          "name": "TestRootIsExplicitOptIn",
+          "what": "Test roots are passed via -t and NOT auto-detected from cwd",
+          "why": [
+            "Auto-detecting './test' against a source root of 'backend/src' would mean looking for './test', './backend/test', '../test', and other paths; the heuristics get confused fast.",
+            "Opt-in by explicit path is also a signal of intent: passing the test root means you've decided you want coverage analysis. Silently running it on any directory called 'test' that happens to exist would be a surprise.",
+            "Like the annotations path: explicit-but-missing is a hard error (you typoed and should know); implicit-and-missing is silent (you didn't ask for it)."
+          ],
+          "affects": ["resolveTests"]
+        }
+      ],
+      "invariants": {
+        "main": [
+          "wraps the optparse-applicative parser execution and dispatches to run"
+        ],
+        "run": [
+          "resolves annotations and test roots, builds a ChaseConfig, calls Chase.Pipeline.runChase"
+        ],
+        "resolveAnnotations": [
+          "AnnFile <path>: must exist or hard error with exitFailure",
+          "AnnAuto: returns Just defaultAnnotationsPath if it exists, else Nothing (silent)",
+          "AnnOff: returns Nothing without checking the filesystem",
+          "the asymmetry between explicit and auto is intentional"
+        ],
+        "resolveTests": [
+          "TestsExplicit <paths>: each path must be a directory or hard error",
+          "TestsAuto: probes 'test', 'tests', 'spec' adjacent to the source root and returns whichever exist; if none, returns []",
+          "TestsOff: returns [] without checking the filesystem"
+        ],
+        "loadAnnotationsOrDie": {
+          "notes": [
+            "Nothing input -> empty Map (no annotations file in play)",
+            "Just path -> calls loadAnnotations; on Left, prints to stderr and exits non-zero",
+            "prints a 'load <path> (N modules)' line on success for operator feedback"
+          ],
+          "consumes": [
+            "main.run (only caller)"
+          ]
+        }
+      }
+    }
+
+  }
+}
