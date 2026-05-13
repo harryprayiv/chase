@@ -4,20 +4,32 @@ Structural compression of Haskell and PureScript source for LLM context.
 
 ## What problem this solves
 
-When you ask an LLM for help with a real codebase, you face a tradeoff: paste
-all the source and burn most of the context window before you've asked your
-question, or paste a curated subset and watch the LLM hallucinate the parts
-you left out. Both fail in different ways.
+When you ask an LLM for help with a real codebase, you face a tradeoff:
+paste all the source and burn most of the context window before you've
+asked your question, or paste a curated subset and watch the LLM
+hallucinate the parts you left out. Both fail in different ways.
 
-`chase` is a third option. It reads your Haskell and PureScript source files
-and emits a compressed representation that preserves the things an LLM
-cannot reconstruct from a type signature (architectural decisions,
-behavioral invariants, state machine topologies, magic constants, downstream
-dependents, known problems, test coverage gaps) while dropping the things
-it can (function bodies, import name lists, boilerplate). The result is a
-single text file you paste into a fresh conversation that gives the model
-substantially more useful context per token than either source or
-hand-written summaries.
+`chase` is a third option. It reads your Haskell and PureScript source
+files and emits a compressed representation that preserves the things
+an LLM cannot reconstruct from a type signature (architectural
+decisions, behavioral invariants, state machine topologies, magic
+constants, downstream dependents, known problems, test coverage gaps)
+while dropping the things it can (function bodies, import name lists,
+boilerplate). The result is a single text file you paste into a fresh
+conversation that gives the model substantially more useful context
+per token than either source or hand-written summaries.
+
+Writing the annotations is itself a problem. Hand-authoring them is
+the highest-quality path but does not scale past a few thousand lines,
+and on an unfamiliar module you do not yet know what an invariant for
+*this* function should say. Chase ships a second mode, `chase-annotate`,
+that hands the structural skeleton to an LLM through Grace and validates
+the result against the same drift checker the main extractor uses. The
+two passes form a closed loop: the parser bounds what the LLM can claim
+about names, the typed Grace schema bounds what shapes it can return,
+and the LLM proposes the behavioral content neither side can infer.
+Wrong function names cannot escape the loop; wrong invariant text
+still can, and that part is on the human reviewer.
 
 The name comes from "cut to the chase": skip the preamble, get to what
 actually matters.
@@ -344,6 +356,166 @@ patterns, same as a decision's affects.
 If a thing is fixed, delete the open issue. The annotation file is not
 an archive.
 
+## Generating annotations with grace
+
+The structural skeleton tells the LLM what your code is shaped like.
+The annotations tell it how the code actually behaves. Two ways to
+produce them:
+
+- **By hand**, when you have a feel for what an invariant for *this*
+  function should say. Highest quality per annotation, does not scale
+  past a few thousand lines.
+- **By `chase-annotate`**, which hands the skeleton to an LLM through
+  Grace, validates the response against chase's drift checker, and
+  writes the result in the JSON format chase already consumes. A draft
+  on every signature in one shot.
+
+The interesting part is how those two halves talk to each other, and
+that is where chase's design departs from how LLM tooling usually gets
+built.
+
+### The closed loop
+
+A normal LLM-in-the-loop tool calls the model, parses the response, and
+hopes the response was right. Failure modes that survive include
+references to functions that do not exist, JSON that does not match the
+shape the caller wanted, and confident assertions about code the model
+cannot have seen. The downstream code copes by treating the LLM's
+output as untrusted, which means a human has to read every line.
+
+Chase's drift checker already validates names: an invariant attached to
+a function the parser never saw, or a decision whose `affects` list
+mentions an unknown name, becomes a warning when chase renders. That
+validator is the same code path whether the annotations were
+hand-written or generated. Plumbing the same checker into the LLM loop
+turns it into a feedback signal.
+
+The mechanics:
+
+1. `chase-annotate` parses the source file via `Chase.Parse`, renders
+   the chase skeleton, and hands the skeleton to the typed Grace
+   expression at `grace/genAnnotations.ffg` along with the OpenAI key.
+2. Grace compiles the expression's return type to a JSON Schema and
+   submits both the prompt and the schema to OpenAI. The response is
+   rejected by OpenAI itself if the shape does not match. The Haskell
+   side gets back a typed `GenAnnotations` value, not a string to
+   parse.
+3. The typed value is converted to a chase `ModuleAnnotations`, merged
+   onto the parsed `ChaseFile`, and run through
+   `Chase.Pipeline.checkAnnotationDrift`. Any drift warnings (an
+   invariant attached to `fooBar` when the file has no `fooBar`) come
+   back as a `[Text]`.
+4. If the warning list is empty, write the file. If it is not empty
+   and the retry budget is not exhausted, call the generator again
+   with `driftWarnings` set to the warnings. The Grace template
+   surfaces those warnings inline in the prompt text so the model
+   sees its own previous failure mode.
+5. The loop converges in one or two passes on every module tested.
+   When it does not converge, write the file anyway and print the
+   residual warnings to stderr; the human reviewer fixes those by
+   hand.
+
+What this closes off: hallucinated function names. The drift checker
+rejects them, the warnings fold back, the model corrects. Names in the
+final annotation file are real names from the source.
+
+What this does not close off: hallucinated behavior. The model can
+write a plausible-sounding `why` block that describes something the
+function does not do. The static analyzer has no way to know. The
+human reviewer is the only check, the same way the human reviewer is
+the only check on any other LLM output that survives schema
+validation.
+
+The point of the architecture is not to eliminate hallucination. It is
+to eliminate the most embarrassing class of hallucination (the model
+fabricating function names) by making the same parser that grounds the
+LLM's input also validate the LLM's output. The cost is one extra round
+trip in roughly half of generation passes; the budget is bounded by
+`--max-retries`.
+
+### Architecture
+
+Three deliberate separations make this work without entangling the
+deterministic core of chase with the LLM-facing surface.
+
+**The Grace expression is a typed Haskell function from the outside.**
+`grace/genAnnotations.ffg` is a Grace file declaring a function of
+type `GenArgs -> IO GenAnnotations`. The bridge loads it via Grace's
+`load` function, gets back something with that Haskell type via the
+`FromGrace (a -> IO b)` instance, and calls it. The prompt is not a
+string embedded in Haskell that requires a recompile to edit; it is a
+checked-in, version-controlled file that the Haskell side knows by
+type. Editing the prompt is a diff, not a build.
+
+**The bridge is a separate cabal sublibrary.** `chase-grace-bridge`
+lives under `src-bridge/` with its own dependency closure (grace,
+which transitively pulls in megaparsec, http-client, openai-servant,
+and the rest). The main `chase` library and the deterministic `chase`
+executable do not know it exists. Anyone who only wants the
+structural extractor builds chase without ever resolving grace.
+Replacing grace with a different prompt library or backend (a
+self-hosted inference server with a JSON-Schema-driven structured
+output API, a different vendor's API) is a two-file change:
+`grace/genAnnotations.ffg` and `src-bridge/Chase/GraceBridge.hs`.
+Nothing in `src/` moves.
+
+**The schema lives at the type, not in two places.** The grace
+schema's field names come from the Haskell record's
+`Generic`-derived `selName`. Renaming a Haskell field renames the
+grace schema field. There is no manual translation layer between the
+two, which means there is no manual translation layer to forget to
+update.
+
+### Usage
+
+    chase-annotate src/MyModule.hs --key $OPENAI_API_KEY
+
+The generator parses the file via the same `Chase.Parse` entry point
+the main extractor uses, renders the chase skeleton, and feeds it to
+the grace template along with the API key. The template prompts the
+model for typed structured output matching the schema. The result is
+serialized to `chase-annotations.json` and validated against the same
+drift checker the main extractor runs.
+
+Flags:
+
+- `--template FILE`: path to the grace prompt template. Defaults to
+  `grace/genAnnotations.ffg`. Edit the template to change the prompt
+  shape; no Haskell rebuild required.
+- `-o FILE` / `--output FILE`: where to write the annotations JSON.
+  Defaults to `chase-annotations.json`.
+- `--max-retries N`: how many drift-feedback iterations to allow.
+  Defaults to 2.
+
+### What the model gets wrong
+
+Predictable failure modes from the first uses:
+
+- Restates the type as an invariant ("takes a list and returns a
+  sorted list" under `sort :: Ord a => [a] -> [a]`). The template
+  explicitly tells the model not to do this; it does anyway
+  sometimes. Delete those lines on review.
+- Hallucinates side effects that match common patterns but are not
+  present (claims a function "logs to stderr on failure" when the
+  function does not log at all). The structural skeleton does not
+  contain the function body, so the model is guessing from the name
+  and signature.
+- Misses real side effects that the type does not advertise. The
+  `last_seen_at` write inside `lookupSession` is the canonical
+  example; the model cannot see it because the function body is not
+  in the bundle. This is the kind of invariant only the human author
+  can supply.
+- Confuses `decisions` and `openIssues`. The grace template tries to
+  distinguish them; the model sometimes still puts a known-bad
+  behavior in `decisions` (defending it) when it belongs in
+  `openIssues` (flagging it).
+
+The intended workflow is: run `chase-annotate`, read the output,
+keep what is right, fix what is close, delete what is wrong. The
+generator's value is in giving you a starting point on every
+signature in one shot, not in producing something you commit
+unreviewed.
+
 ## Test coverage analysis
 
 When invoked with test roots (passed explicitly via `-t` or
@@ -460,159 +632,16 @@ test-quality tool. A function appearing in five test files might still
 be exercising only one branch. The `?` line tells you something is
 referencing it. That's the entire contract.
 
-## Annotating with grace
-
-The structural skeleton tells the LLM what your code is shaped like.
-The annotations tell it how the code actually behaves. Writing those
-annotations by hand is the highest-quality path and the right move
-once you have a feel for what a useful invariant looks like, but it
-does not scale, and it is not the right first pass on an unfamiliar
-module.
-
-`chase-annotate` is an LLM-driven first pass. It generates a candidate
-`chase-annotations.json` by handing the chase skeleton to a model
-through grace, validating the response against chase's existing drift
-checker, and writing the result in the format chase already consumes.
-The output is a starting point you read and edit, not a final
-artifact. The cycle is: model proposes, human disposes. The model is
-fast and gives you a draft on every signature in the module. The
-human is the source of truth for whether the proposed invariants are
-right.
-
-### Architecture
-
-The annotation generator is a Grace expression at
-`grace/genAnnotations.ffg`. Grace is a typed configuration language
-with first-class LLM prompting; the file is a function from
-`{ key, bundle, modName, driftWarnings }` to a typed record of
-invariants, decisions, and open issues. The expression is loaded by
-the `chase-grace-bridge` sublibrary via Grace's `load` function,
-decoded as a typed Haskell function via the `FromGrace (a -> IO b)`
-instance, and called once per module.
-
-This means the grace expression is the prompt template, in the
-literal sense: editing the prompt does not require recompiling
-Haskell. The Haskell side knows the schema. The grace side knows the
-prose. They meet at the type.
-
-The bridge is a separate cabal sublibrary that depends on grace. The
-main `chase` library and the deterministic `chase` executable do not
-know grace exists. Network access, OpenAI, and grace's full
-dependency closure (megaparsec, http-client, openai-servant, et al.)
-are isolated to the `chase-annotate` executable. If grace upstream
-gets inconvenient, or if grace gains a backend other than OpenAI, the
-entire LLM-facing surface lives in two files
-(`grace/genAnnotations.ffg` and `src-bridge/Chase/GraceBridge.hs`).
-Everything in `src/` is untouched.
-
-### Usage
-
-    chase-annotate src/MyModule.hs --key $OPENAI_API_KEY
-
-The generator parses the file via the same `Chase.Parse` entry point
-the main extractor uses, renders the chase skeleton, and feeds it to
-the grace template along with the API key. The template prompts the
-model for typed structured output matching the schema. The result is
-serialized to `chase-annotations.json` and validated against the same
-drift checker the main extractor runs.
-
-Flags:
-
-- `--template FILE`: path to the grace prompt template. Defaults to
-  `grace/genAnnotations.ffg`. Edit the template to change the prompt
-  shape; no Haskell rebuild required.
-- `-o FILE` / `--output FILE`: where to write the annotations JSON.
-  Defaults to `chase-annotations.json`.
-- `--max-retries N`: how many drift-feedback iterations to allow.
-  Defaults to 2.
-
-### The drift feedback loop
-
-The model can hallucinate any content it wants in the `why`, `what`,
-and invariant `body` fields. Those are content errors that chase has
-no way to detect; the human reviewer catches them at PR time. What
-chase can detect is hallucinated names: an invariant attached to a
-function that does not exist in the module, or a decision whose
-`affects` list mentions a name the parser never saw.
-
-The chase library already has `checkAnnotationDrift` for this. When
-`chase-annotate` finishes a generation pass, it runs the drift
-checker against the model's output. If the drift list is non-empty,
-it folds the warnings into the `driftWarnings` field of the next
-grace prompt and re-runs. The grace template surfaces the warnings
-inline so the model sees its own previous failure mode and can
-correct on the next attempt.
-
-The loop is bounded by `--max-retries` and almost always converges in
-one or two passes. When it does not converge, the output is still
-written; the drift warnings are printed to stderr so the human knows
-what to fix by hand.
-
-This is not a hallucination-elimination claim. It is a hallucination-
-of-names elimination claim. Wrong invariant text, plausible-sounding
-but invented behavior in `why` blocks, factually incorrect `notes`
-lines: all of these can still slip through, and the only catch for
-them is the human reading the JSON before checking it in. What the
-loop reliably catches is the most embarrassing failure mode, which is
-the model writing `affects: ["fooBar"]` when no `fooBar` exists in
-the bundle it was given.
-
-### What the model gets wrong
-
-Predictable failure modes from the first uses:
-
-- Restates the type as an invariant ("takes a list and returns a
-  sorted list" under `sort :: Ord a => [a] -> [a]`). The template
-  explicitly tells the model not to do this; it does anyway
-  sometimes. Delete those lines on review.
-- Hallucinates side effects that match common patterns but are not
-  present (claims a function "logs to stderr on failure" when the
-  function does not log at all). The structural skeleton does not
-  contain the function body, so the model is guessing from the name
-  and signature.
-- Misses real side effects that the type does not advertise. The
-  `last_seen_at` write inside `lookupSession` is the canonical
-  example; the model cannot see it because the function body is not
-  in the bundle. This is the kind of invariant only the human author
-  can supply.
-- Confuses `decisions` and `openIssues`. The grace template tries to
-  distinguish them; the model sometimes still puts a known-bad
-  behavior in `decisions` (defending it) when it belongs in
-  `openIssues` (flagging it).
-
-The intended workflow is: run `chase-annotate`, read the output,
-keep what is right, fix what is close, delete what is wrong. The
-generator's value is in giving you a starting point on every
-signature in one shot, not in producing something you commit
-unreviewed.
-
-### Why grace and not direct OpenAI bindings
-
-Three things grace buys you that direct bindings do not:
-
-- Structured output is type-driven. The grace expression's return
-  type is a Haskell record (via Generic-derived `ToGraceType`), which
-  grace compiles to an OpenAI JSON Schema. The model literally cannot
-  return a malformed shape; OpenAI rejects responses that do not
-  match the schema. You get back a typed Haskell value, not a string
-  you parse and pray over.
-- The prompt is data. `grace/genAnnotations.ffg` is checked in,
-  diffable, versionable. A PR that changes the prompt is a normal
-  PR. There is no embedded prompt string buried in a Haskell module
-  that requires a recompile to edit.
-- The bridge is small. Replacing grace with something else (a
-  different prompt library, a different LLM backend, a self-hosted
-  inference server with the same JSON-Schema-driven structured output
-  API) is a two-file change. The deterministic chase pipeline does
-  not see any of it.
-
 ## Recommended workflow
 
 1. Run the bare extractor first. Read the `.chase` output as if you'd
    never seen the codebase. Identify modules where the structural
    skeleton alone would not be enough to make a small correct change.
 2. Annotate one of those modules. Start with the smallest one with the
-   most behavioral subtlety.
+   most behavioral subtlety. Either write the annotations by hand, or
+   run `chase-annotate src/Foo.hs --key $OPENAI_API_KEY` to get a draft
+   and edit it. The drift checker catches hallucinated names regardless
+   of which path you took.
 3. Test in a fresh LLM conversation: paste only the annotated `.chase`
    bundle, ask for a small change, see what comes back. The mistakes the
    model makes tell you what's missing from your annotations.
@@ -631,21 +660,15 @@ Three things grace buys you that direct bindings do not:
    intentional.
 7. Repeat for the next priority module.
 
-Steps 1 and 2 can be partially automated. Run
-`chase-annotate src/Foo.hs --key $OPENAI_API_KEY` against a module
-to get a candidate `chase-annotations.json` populated with model-
-generated invariants, decisions, and open issues. Read it before
-committing; treat it like a PR from a fast junior collaborator who
-has read the type signatures but never the function bodies. See
-**Annotating with grace** above for what the generator does and
-does not catch.
-
 Do not annotate everything before testing. The format and the kinds of
 invariants worth recording will both shift after the first real test.
 Do not turn on coverage analysis before you have annotations either:
 coverage tells you what's untested, but on a fresh codebase the bigger
 problem is that the LLM doesn't yet have enough behavioral context to
-read the existing tests usefully.
+read the existing tests usefully. The same principle applies to
+`chase-annotate`: a draft annotation file from the generator is more
+useful as input to step 3 than running it across the whole codebase
+before you have a feel for what the drafts look like.
 
 ## Parser notes
 
@@ -789,7 +812,9 @@ it as the source of truth, the project is in trouble.
 Annotations are free-form text. They are not type-checked against
 behavior; they are checked only for the existence of the function names
 they reference. Wrong annotations produce wrong-but-confident LLM
-output. The drift checker is a sanity net, not a verifier.
+output. The drift checker is a sanity net, not a verifier. This applies
+to `chase-annotate` output too: the names are guaranteed real, the
+sentences attached to them are not.
 
 `consumes` is not drift-checked. Validating it would require gathering
 signatures from every parsed file before checking any single file's
@@ -876,6 +901,24 @@ memory.
 
 You can use both. They serve different readers.
 
+## Why this and not just paste the source?
+
+Source has function bodies in it. Function bodies are most of the
+tokens and very little of the information an LLM needs to reason about
+your code at the architectural level. Pasting the source either burns
+the context window before you've asked your question (for any real
+codebase) or forces you to curate a subset, which puts the LLM in the
+position of inferring everything you left out. Chase output is the
+curation done once and reused.
+
+The harder question is: if function bodies are the information you
+actually need for some specific task, would chase get in the way?
+Answer: yes, and that is the right time to fall back to pasting the
+relevant function bodies in. Chase is for the architectural and
+behavioral context that does not vary per question. The function body
+of the specific thing you are debugging is per-question context, and
+the bundle is small enough that you can fit both.
+
 ## Build
 
 The flake provides a GHC 9.10 dev shell. The PureScript CST parser
@@ -891,6 +934,13 @@ version is bumped in `flake.nix` (or when you want to refresh from a
 clean state). The resulting `vendor/purescript-cst/` directory is
 expected to be present at build time but should not be committed
 verbatim; gitignore it and treat it as generated.
+
+The `chase-annotate` executable is built by the same `cabal build`
+invocation but requires resolving grace (and grace's transitive
+dependencies) at build time. If you do not want to build the LLM-facing
+surface, build only the main `chase` executable: `cabal build chase`.
+The library and the deterministic executable have no grace dependency
+on the build graph.
 
 ## Status
 
@@ -937,19 +987,23 @@ function with no test references is almost certainly untested; a
 function with many test references is at least exercised, but the
 quality of that exercise is something static analysis cannot speak to.
 
-The LLM-driven annotation generator (`chase-annotate`) was added once
-the manual annotation burden on cheeblr's backend made it clear that
-"annotate every signature from scratch" was the wrong unit of work.
-The generator is structured so that the deterministic chase library
-stays free of network and OpenAI dependencies: the bridge is a
-separate cabal sublibrary, and the grace template that drives the
-prompt is a single check-in-able file. The drift feedback loop, which
-folds chase's existing same-file drift warnings back into the next
-grace prompt, is the architectural payoff: hallucinated function
-names cannot escape the loop, and the model converges in one or two
-iterations on every module tested so far. Hallucinated content (wrong
-invariant text, invented side effects in `why` blocks) is still on
-the human reviewer.
+The Grace integration is the most consequential addition. The shape of
+the change is that chase now contains both halves of a closed-loop
+LLM-in-tooling architecture: the parser bounds what the LLM can claim
+about the names in the source, the typed Grace schema bounds what
+shapes the LLM can return, and the drift checker that already validated
+hand-written annotations now also validates LLM-generated ones, folding
+its warnings back into the next prompt. Hallucinated function names do
+not escape the loop. The deterministic chase library and its executable
+do not learn about grace: the LLM-facing surface lives in a separate
+cabal sublibrary plus a single executable plus the version-controlled
+Grace prompt file, three artifacts you can replace independently of the
+core. The win is architectural, not headline-feature: chase did not
+gain a chatbot, it gained a typed feedback path between the LLM and the
+existing static analysis. Content hallucination (wrong invariant text,
+invented side effects, plausible-sounding but false `why` blocks) is
+still on the human reviewer; this is not a hallucination-elimination
+claim, it is a hallucination-of-names elimination claim.
 
 The CLI was also rebuilt around `optparse-applicative` with
 auto-detection for both annotations and test roots, so the common case
@@ -986,19 +1040,19 @@ Honest open questions:
   field, or relaxing the parser to also recognize types and class
   names, would let these decisions stay specific instead of falling
   back to `[]`.
-- Whether the LLM-driven annotation generator scales to the kinds of
-  modules where annotations matter most. The generator does well on
-  modules with strong type signatures and obvious behavioral
-  conventions; it struggles on modules whose key invariants are
-  about side effects the type does not advertise (the
-  `last_seen_at`-on-read pattern is the canonical example). Whether
-  this is fixable by extending the grace template, by including more
-  of the source than the structural skeleton, or by giving up and
-  treating the generator as a draft-only tool, is an open question.
+- Whether the Grace generator scales to the kinds of modules where
+  annotations matter most. The generator does well on modules with
+  strong type signatures and obvious behavioral conventions; it
+  struggles on modules whose key invariants are about side effects the
+  type does not advertise (the `last_seen_at`-on-read pattern is the
+  canonical example). Whether this is fixable by extending the grace
+  template, by including more of the source than the structural
+  skeleton, or by giving up and treating the generator as a draft-only
+  tool, is an open question.
 - Whether the bridge architecture (chase deterministic, grace-driven
-  annotation separate) holds up when more LLM-facing passes are
-  added (coverage triage, refactor plans, cross-module `consumes`
-  inference), or whether the bridge sublibrary grows into a
-  catch-all that should itself be split.
+  annotation separate) holds up when more LLM-facing passes are added
+  (coverage triage, refactor plans, cross-module `consumes`
+  inference), or whether the bridge sublibrary grows into a catch-all
+  that should itself be split.
 
 Open to issues and PRs from anyone using this on their own code.
