@@ -1,0 +1,71 @@
+# Generate annotations for one module given its chase bundle skeleton.
+#
+# Invoked from Haskell as a typed function. The schema below drives
+# OpenAI structured output via Grace's toJSONSchema; the model cannot
+# return malformed shapes.
+
+\arguments ->
+
+let key = arguments.key
+let bundle = arguments.bundle
+let modName = arguments.modName
+let driftWarnings = arguments.driftWarnings
+
+let driftSection =
+      if length driftWarnings == 0
+      then ""
+      else "
+        The previous attempt produced these drift warnings:
+
+        ${fold { cons: \x y -> "- ${x}\n${y}", nil: "" } driftWarnings}
+
+        Do not reference function names that do not appear in the bundle.
+        "
+
+in  prompt
+      { key
+      , text: "
+          You are generating structured annotations for the Haskell or
+          PureScript module ${modName}.
+
+          Chase bundle (structural skeleton, function bodies omitted):
+
+          ${bundle}
+
+          For each top-level signature, emit at most one invariant whose
+          'function' field exactly matches the signature name in the bundle.
+          Invariant lines are short factual statements about the function's
+          behavior, effects, or invariants. Do not invent behavior you
+          cannot infer from the signature, name, and surrounding context.
+
+          Emit decisions only for non-obvious design choices visible in the
+          module's shape. Affects must be a list of signature names that
+          appear verbatim in the bundle.
+
+          Emit open issues only for clear hazards visible in the code shape
+          (unsafe assumptions, partial functions, obvious gaps).
+
+          Prefer fewer high-confidence annotations to many low-confidence ones.
+
+          ${driftSection}
+        "
+      }
+      : { invariants:
+            List { function: Text
+                 , lines: List Text
+                 , consumes: List Text
+                 }
+        , decisions:
+            List { name: Text
+                 , what: Text
+                 , why: Text
+                 , affects: List Text
+                 }
+        , openIssues:
+            List { name: Text
+                 , what: Text
+                 , why: Text
+                 , blocking: List Text
+                 , affects: List Text
+                 }
+        }
