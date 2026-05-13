@@ -1,8 +1,9 @@
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE DeriveAnyClass       #-}
+{-# LANGUAGE DeriveGeneric        #-}
+{-# LANGUAGE DerivingStrategies   #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings    #-}
+{-# LANGUAGE RecordWildCards      #-}
 
 -- | Glue layer between chase and grace.
 --
@@ -22,18 +23,16 @@ module Chase.GraceBridge
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Aeson (FromJSON, ToJSON)
-import Data.Text (Text)
-import GHC.Generics (Generic)
-import Grace.Decode (FromGrace)
-import Grace.Encode (ToGrace)
-import Grace.Marshal (Key (..), ToGraceType)
-import Grace.Input (Input (..), Mode (..))
-import Grace.Interpret (load)
+import Data.Aeson             (FromJSON, ToJSON)
+import Data.Text              (Text)
+import GHC.Generics           (Generic)
+import Grace.Decode           (FromGrace, Key (..), ToGraceType)
+import Grace.Encode           (ToGrace)
+import Grace.Input            (Input (..), Mode (..))
+import Grace.Interpret        (load)
 
 import qualified Chase.Pipeline as Pipeline
-import qualified Chase.Types as CT
-import qualified Data.Text as T
+import qualified Chase.Types    as CT
 
 -- | Inputs the grace prompt template expects, as a record.
 --

@@ -11,7 +11,7 @@ import qualified Data.Text          as T
 import           Data.Text          (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString    as BS
-import           Data.List          (sortOn)
+import           Data.List          (foldl', sortOn)
 import qualified Data.Map.Strict    as Map
 
 import GHC.Data.FastString       (mkFastString)
@@ -385,6 +385,19 @@ pragmasFromSource src =
            Nothing -> Nothing
 
 
+-- | Hand-rolled Settings stand-in. ghc-lib-parser expects a real Settings
+-- value to instantiate DynFlags, but the actual parser path reads only a
+-- small subset (language extensions, source positions, parser options).
+-- The field set below is what nixpkgs 24.11's ghc96 ghc-lib-parser
+-- expects in its PlatformMisc and ToolSettings records. Newer ghc-lib-
+-- parser releases add fields (toolSettings_pgm_JSP for the JavaScript
+-- preprocessor, toolSettings_pgm_CmmP for CmmCpp, toolSettings_pgm_las
+-- for the LLVM assembler, toolSettings_cmmCppSupportsG0,
+-- toolSettings_mergeObjsSupportsResponseFiles,
+-- platformMisc_targetRTSLinkerOnlySupportsSharedLibs, plus matching
+-- opt_* variants). When chase moves to a newer ghc-lib-parser those
+-- additions must be added back here; the compile error is immediate
+-- and self-explanatory ("Not in scope: ...").
 probedSettings :: Settings.Settings
 probedSettings = Settings.Settings
   { Settings.sGhcNameVersion = probedGhcNameVersion
@@ -412,61 +425,53 @@ probedFileSettings = Settings.FileSettings
 
 probedPlatformMisc :: Settings.PlatformMisc
 probedPlatformMisc = Settings.PlatformMisc
-  { Settings.platformMisc_targetPlatformString               = ""
-  , Settings.platformMisc_ghcWithInterpreter                 = False
-  , Settings.platformMisc_libFFI                             = False
-  , Settings.platformMisc_llvmTarget                         = ""
-  , Settings.platformMisc_targetRTSLinkerOnlySupportsSharedLibs = False
+  { Settings.platformMisc_targetPlatformString = ""
+  , Settings.platformMisc_ghcWithInterpreter   = False
+  , Settings.platformMisc_libFFI               = False
+  , Settings.platformMisc_llvmTarget           = ""
   }
 
 probedToolSettings :: Settings.ToolSettings
 probedToolSettings = Settings.ToolSettings
-  { Settings.toolSettings_ldSupportsCompactUnwind        = False
-  , Settings.toolSettings_ldSupportsFilelist             = False
-  , Settings.toolSettings_ldSupportsSingleModule         = False
-  , Settings.toolSettings_mergeObjsSupportsResponseFiles = False
-  , Settings.toolSettings_ldIsGnuLd                      = False
-  , Settings.toolSettings_ccSupportsNoPie                = False
-  , Settings.toolSettings_useInplaceMinGW                = False
-  , Settings.toolSettings_arSupportsDashL                = False
-  , Settings.toolSettings_cmmCppSupportsG0               = False
-  , Settings.toolSettings_pgm_L                          = ""
-  , Settings.toolSettings_pgm_P                          = ("", [])
-  , Settings.toolSettings_pgm_JSP                        = ("", [])
-  , Settings.toolSettings_pgm_CmmP                       = ("", [])
-  , Settings.toolSettings_pgm_F                          = ""
-  , Settings.toolSettings_pgm_c                          = ""
-  , Settings.toolSettings_pgm_cxx                        = ""
-  , Settings.toolSettings_pgm_cpp                        = ("", [])
-  , Settings.toolSettings_pgm_a                          = ("", [])
-  , Settings.toolSettings_pgm_l                          = ("", [])
-  , Settings.toolSettings_pgm_lm                         = Nothing
-  , Settings.toolSettings_pgm_windres                    = ""
-  , Settings.toolSettings_pgm_ar                         = ""
-  , Settings.toolSettings_pgm_otool                      = ""
-  , Settings.toolSettings_pgm_install_name_tool          = ""
-  , Settings.toolSettings_pgm_ranlib                     = ""
-  , Settings.toolSettings_pgm_lo                         = ("", [])
-  , Settings.toolSettings_pgm_lc                         = ("", [])
-  , Settings.toolSettings_pgm_las                        = ("", [])
-  , Settings.toolSettings_pgm_i                          = ""
-  , Settings.toolSettings_opt_L                          = []
-  , Settings.toolSettings_opt_P                          = []
-  , Settings.toolSettings_opt_JSP                        = []
-  , Settings.toolSettings_opt_CmmP                       = []
-  , Settings.toolSettings_opt_P_fingerprint              = fingerprint0
-  , Settings.toolSettings_opt_JSP_fingerprint            = fingerprint0
-  , Settings.toolSettings_opt_CmmP_fingerprint           = fingerprint0
-  , Settings.toolSettings_opt_F                          = []
-  , Settings.toolSettings_opt_c                          = []
-  , Settings.toolSettings_opt_cxx                        = []
-  , Settings.toolSettings_opt_a                          = []
-  , Settings.toolSettings_opt_l                          = []
-  , Settings.toolSettings_opt_lm                         = []
-  , Settings.toolSettings_opt_windres                    = []
-  , Settings.toolSettings_opt_lo                         = []
-  , Settings.toolSettings_opt_lc                         = []
-  , Settings.toolSettings_opt_las                        = []
-  , Settings.toolSettings_opt_i                          = []
-  , Settings.toolSettings_extraGccViaCFlags              = []
+  { Settings.toolSettings_ldSupportsCompactUnwind   = False
+  , Settings.toolSettings_ldSupportsFilelist        = False
+  , Settings.toolSettings_ldSupportsSingleModule    = False
+  , Settings.toolSettings_ldIsGnuLd                 = False
+  , Settings.toolSettings_ccSupportsNoPie           = False
+  , Settings.toolSettings_useInplaceMinGW           = False
+  , Settings.toolSettings_arSupportsDashL           = False
+  , Settings.toolSettings_pgm_L                     = ""
+  , Settings.toolSettings_pgm_P                     = ("", [])
+  , Settings.toolSettings_pgm_F                     = ""
+  , Settings.toolSettings_pgm_c                     = ""
+  , Settings.toolSettings_pgm_cxx                   = ""
+  , Settings.toolSettings_pgm_a                     = ("", [])
+  , Settings.toolSettings_pgm_l                     = ("", [])
+  , Settings.toolSettings_pgm_lm                    = Nothing
+  , Settings.toolSettings_pgm_dll                   = ("", [])
+  , Settings.toolSettings_pgm_T                     = ""
+  , Settings.toolSettings_pgm_windres               = ""
+  , Settings.toolSettings_pgm_ar                    = ""
+  , Settings.toolSettings_pgm_otool                 = ""
+  , Settings.toolSettings_pgm_install_name_tool     = ""
+  , Settings.toolSettings_pgm_ranlib                = ""
+  , Settings.toolSettings_pgm_lo                    = ("", [])
+  , Settings.toolSettings_pgm_lc                    = ("", [])
+  , Settings.toolSettings_pgm_lcc                   = ("", [])
+  , Settings.toolSettings_pgm_i                     = ""
+  , Settings.toolSettings_opt_L                     = []
+  , Settings.toolSettings_opt_P                     = []
+  , Settings.toolSettings_opt_P_fingerprint         = fingerprint0
+  , Settings.toolSettings_opt_F                     = []
+  , Settings.toolSettings_opt_c                     = []
+  , Settings.toolSettings_opt_cxx                   = []
+  , Settings.toolSettings_opt_a                     = []
+  , Settings.toolSettings_opt_l                     = []
+  , Settings.toolSettings_opt_lm                    = []
+  , Settings.toolSettings_opt_windres               = []
+  , Settings.toolSettings_opt_lo                    = []
+  , Settings.toolSettings_opt_lc                    = []
+  , Settings.toolSettings_opt_lcc                   = []
+  , Settings.toolSettings_opt_i                     = []
+  , Settings.toolSettings_extraGccViaCFlags         = []
   }

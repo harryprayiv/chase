@@ -2,56 +2,103 @@
   description = "chase: structural compression of Haskell source for LLM context";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+
     flake-utils.url = "github:numtide/flake-utils";
+
+    grace = {
+      url = "github:Gabriella439/grace";
+    };
+
     purescript-src = {
       url = "github:purescript/purescript/v0.15.16";
       flake = false;
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, purescript-src }:
+  outputs = { self, nixpkgs, flake-utils, grace, purescript-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs  = import nixpkgs { inherit system; };
-        hpkgs = pkgs.haskell.packages.ghc910;
+        compiler = "ghc96";
+
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowBroken = true;
+          overlays = [
+            grace.overlays.${compiler}
+
+            (final: prev:
+              let hlib = final.haskell.lib;
+              in {
+                haskell = prev.haskell // {
+                  packages = prev.haskell.packages // {
+                    ${compiler} = prev.haskell.packages.${compiler}.override (old: {
+                      overrides = final.lib.composeExtensions
+                        (old.overrides or (_: _: { }))
+                        (hself: hsuper: {
+                          grace =
+                            hlib.dontCheck
+                              (hlib.dontHaddock
+                                (hsuper.callPackage
+                                  "${grace}/dependencies/grace.nix" { }));
+                        });
+                    });
+                  };
+                };
+              })
+          ];
+        };
+
+        hpkgs = pkgs.haskell.packages.${compiler};
 
         vendor-purescript-cst = import ./vendor.nix {
           inherit pkgs purescript-src;
         };
 
-        cheeblr-dist = hpkgs.callCabal2nix "cheeblr-dist" ./. { };
+        chase = hpkgs.callCabal2nix "chase" ./. { };
       in {
-        packages.default               = cheeblr-dist;
-        packages.cheeblr-dist          = cheeblr-dist;
-        packages.vendor-purescript-cst = vendor-purescript-cst;
-
-        apps.default = {
-          type    = "app";
-          program = "${cheeblr-dist}/bin/cheeblr-dist";
+        packages = {
+          default = chase;
+          chase   = chase;
+          inherit vendor-purescript-cst;
         };
 
-        apps.vendor-purescript-cst = {
-          type = "app";
-          program = toString (pkgs.writeShellScript "install-vendor-purescript-cst" ''
-            set -euo pipefail
-            target="$PWD/vendor/purescript-cst"
-            rm -rf "$target"
-            mkdir -p "$target"
-            cp -r ${vendor-purescript-cst}/. "$target/"
-            chmod -R u+rw "$target"
-            echo "Vendored purescript CST to $target"
-          '');
+        apps = {
+          default = {
+            type    = "app";
+            program = "${chase}/bin/chase";
+          };
+
+          chase-annotate = {
+            type    = "app";
+            program = "${chase}/bin/chase-annotate";
+          };
+
+          vendor-purescript-cst = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "install-vendor-purescript-cst" ''
+              set -euo pipefail
+              target="$PWD/vendor/purescript-cst"
+              rm -rf "$target"
+              mkdir -p "$target"
+              cp -r ${vendor-purescript-cst}/. "$target/"
+              chmod -R u+rw "$target"
+              echo "Vendored purescript CST to $target"
+            '');
+          };
         };
 
         devShells.default = hpkgs.shellFor {
-          packages = _: [ cheeblr-dist ];
-          buildInputs = with hpkgs; [
+          packages = _: [ chase ];
+
+          nativeBuildInputs = with hpkgs; [
             cabal-install
             haskell-language-server
             ghcid
             fourmolu
           ];
+
+          withHoogle = true;
         };
       });
 }

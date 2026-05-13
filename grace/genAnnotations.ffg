@@ -34,9 +34,10 @@ in  prompt
 
           For each top-level signature, emit at most one invariant whose
           'function' field exactly matches the signature name in the bundle.
-          Invariant lines are short factual statements about the function's
-          behavior, effects, or invariants. Do not invent behavior you
-          cannot infer from the signature, name, and surrounding context.
+          The invariant's 'body' is a list of short factual statements about
+          the function's behavior, effects, or invariants. Do not invent
+          behavior you cannot infer from the signature, name, and surrounding
+          context.
 
           Emit decisions only for non-obvious design choices visible in the
           module's shape. Affects must be a list of signature names that
@@ -52,7 +53,7 @@ in  prompt
       }
       : { invariants:
             List { function: Text
-                 , lines: List Text
+                 , body: List Text
                  , consumes: List Text
                  }
         , decisions:

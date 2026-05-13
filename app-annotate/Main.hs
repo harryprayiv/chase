@@ -9,7 +9,6 @@ import qualified Data.Aeson.Key       as Key
 import qualified Data.Aeson.KeyMap    as KM
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Text            (Text)
-import qualified Data.Text            as T
 import qualified Data.Text.IO         as TIO
 import           Options.Applicative
 import           System.Exit          (exitFailure)
@@ -19,7 +18,7 @@ import qualified Chase.GraceBridge    as GB
 import qualified Chase.Parse          as Parse
 import qualified Chase.Render         as Render
 import qualified Chase.Types          as CT
-import           Grace.Marshal        (Key (..))
+import           Grace.Decode         (Key (..))
 
 data Opts = Opts
   { optSource     :: FilePath
