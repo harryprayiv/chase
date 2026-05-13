@@ -15,6 +15,7 @@ build-type:         Simple
 extra-source-files:
   README.md
   chase-annotation.json
+  grace/genAnnotations.ffg
 
 common warnings
   ghc-options:
@@ -29,12 +30,6 @@ common warnings
 
 -- ------------------------------------------------------------------
 -- Vendored PureScript CST
---
--- These are upstream files from purescript/purescript at tag v0.15.16
--- copied verbatim and renamed from Language.PureScript.* to
--- Chase.Vendor.PureScript.*. They are kept in an internal library
--- so their language extensions and Prelude conventions don't bleed
--- into chase's own source.
 -- ------------------------------------------------------------------
 
 library vendor-purescript-cst
@@ -114,7 +109,7 @@ library vendor-purescript-cst
     happy:happy >= 1.20
 
 -- ------------------------------------------------------------------
--- chase library proper
+-- chase library proper (deterministic core, no network deps)
 -- ------------------------------------------------------------------
 
 library
@@ -125,6 +120,7 @@ library
     OverloadedStrings
     ScopedTypeVariables
   exposed-modules:
+    Chase
     Chase.Annotations.Json
     Chase.Coverage
     Chase.Parse
@@ -147,7 +143,29 @@ library
     , vendor-purescript-cst
 
 -- ------------------------------------------------------------------
--- chase executable
+-- chase-grace-bridge sublibrary
+--
+-- Lives in src-bridge/ to keep the main library's source tree free of
+-- modules that depend on grace. The bridge is a deliberate extension
+-- with its own dependency closure (grace pulls in openai, http-client,
+-- megaparsec, and more).
+-- ------------------------------------------------------------------
+
+library chase-grace-bridge
+  import:           warnings
+  visibility:       public
+  hs-source-dirs:   src-bridge
+  exposed-modules:
+    Chase.GraceBridge
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , aeson                >= 2.0
+    , chase
+    , grace
+    , text
+
+-- ------------------------------------------------------------------
+-- chase executable (deterministic core only)
 -- ------------------------------------------------------------------
 
 executable chase
@@ -163,3 +181,24 @@ executable chase
     , directory
     , filepath
     , optparse-applicative
+
+-- ------------------------------------------------------------------
+-- chase-annotate executable (uses grace to populate annotations JSON)
+-- ------------------------------------------------------------------
+
+executable chase-annotate
+  import:           warnings
+  hs-source-dirs:   app-annotate
+  main-is:          Main.hs
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , base
+    , aeson                >= 2.0
+    , bytestring
+    , chase
+    , chase:chase-grace-bridge
+    , directory
+    , filepath
+    , grace
+    , optparse-applicative
+    , text
