@@ -1056,3 +1056,33 @@ Honest open questions:
   that should itself be split.
 
 Open to issues and PRs from anyone using this on their own code.
+
+# Some Background
+
+I vibe coded Chase over a couple of days because I was tired of pasting source into chat windows and watching the LLM hallucinate the parts I didn't include. The idea was straightforward. Function bodies are most of the tokens and very little of the architecturally interesting content, so I discard them, keep the type signatures, decorate them with hand-written invariants, and add a drift checker that complains whenever an annotation mentions a function the parser has never seen. Cut to the chase, as the name suggests.
+
+I had never heard of Grace. I had not read its documentation. I had not seen its source. I worked from the problem in front of me, made the choices that felt right at each step, and arrived at a tool that does what I needed.
+
+Last week I found Gabriella Gonzalez's work, and the experience was a strange one.
+
+Grace is a typed configuration language with first-class support for LLM prompting. You write a Haskell function declaring the type you want back. Grace compiles that type into a JSON Schema, sends the schema and the prompt to the model, and the model cannot return a malformed shape. What arrives in your program is a typed Haskell value, carrying the same confidence the type system gives you for anything else. It is elegant.
+
+The strange part was that Gabriella had built, in complete ignorance of my existence, the other half of the loop I had been constructing.
+
+I think the framing is what makes this interesting. I did not labor over an architectural design for a year. I built a thing I needed, quickly, and it landed on a shape that Gabriella had arrived at independently. When two people, working independently, with no communication between them, arrive at structures that fit together this cleanly, the usual reading is that the underlying pattern is real. We did not invent the shape. The shape was already there. Two of us noticed it. Wadler and Simon Peyton Jones speak of monads and functors as discoveries rather than inventions, structures that exist in mathematics whether or not anyone names them. The closed-loop architecture, where a parser bounds the names an LLM can use and a typed schema bounds the shapes it can return, may be something of the same kind. It was sitting there waiting for someone to notice it. Two of us did.
+
+Compose the two and the picture is clear enough. Chase already has a drift checker that validates annotation references against the parsed source. Plug its output into Grace's structured response cycle, and the same checker becomes a feedback signal. The model proposes annotations. The parser rejects any that reference functions it has never seen. The rejections fold back into the next prompt as a `driftWarnings` field. The model observes its own previous mistake. The loop converges in a retry or two.
+
+Three constraints, independent of one another, that an agentic workflow has no path around:
+
+- The schema constraint, from Grace: the structured output API refuses malformed shapes.
+- The parser constraint, from Chase: every name in the response must exist in the actual source.
+- The feedback constraint: drift warnings re-enter the next prompt automatically.
+
+What remains is the model's freedom to invent things about behavior. It can describe side effects the function does not have, or compose a plausible reason for something the function does not do. That territory still belongs to the human reviewer, and I suspect it always will. Type systems constrain shape, not meaning.
+
+The coincidence of the names is a small pleasure, and I admit I enjoy it. Cut to the chase, then fall from grace. Skip the preamble, then accept the constraint. The larger fact is that two functional programs, written independently, neither aware of the other, fit together as if they had been designed together. They were not designed together. The fit was already there.
+
+Grace is the more ambitious project by a wide margin. It is a real typed language with parsing, type inference, a normalizer, and a careful treatment of structured output. Chase is two days of vibe coding with a drift checker attached. The asymmetry does not matter much. Both halves are doing the same kind of work: holding language models accountable to a structure outside themselves.
+
+Type systems have always been the discipline that keeps programs honest. It is good to see them keeping language models honest as well.
