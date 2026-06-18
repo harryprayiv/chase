@@ -143,6 +143,30 @@ library
     , vendor-purescript-cst
 
 -- ------------------------------------------------------------------
+-- chase-codebase sublibrary (Unison local-API client)
+--
+-- Lives in src-codebase/ and depends only on http-client/http-types
+-- plus aeson/text/containers/bytestring. No grace, no chase core: the
+-- Unison client is a leaf with a tiny closure, so the deterministic
+-- core stays network-free and the client stays decoupled from grace.
+-- ------------------------------------------------------------------
+
+library chase-codebase
+  import:           warnings
+  visibility:       public
+  hs-source-dirs:   src-codebase
+  exposed-modules:
+    Chase.Unison.Api
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , aeson                >= 2.0
+    , bytestring
+    , containers
+    , http-client
+    , http-types
+    , text
+
+-- ------------------------------------------------------------------
 -- chase-grace-bridge sublibrary
 --
 -- Lives in src-bridge/ to keep the main library's source tree free of
@@ -163,6 +187,8 @@ library chase-grace-bridge
     , chase
     , grace
     , text
+    , http-client
+    , http-types
 
 -- ------------------------------------------------------------------
 -- chase executable (deterministic core only)
@@ -201,4 +227,17 @@ executable chase-annotate
     , filepath
     , grace
     , optparse-applicative
+    , text
+
+-- ------------------------------------------------------------------
+-- chase-unison executable (Unison local-API probe)
+-- ------------------------------------------------------------------
+
+executable chase-unison
+  import:           warnings
+  hs-source-dirs:   app
+  main-is:          ChaseUnison.hs
+  build-depends:
+    , base
+    , chase:chase-codebase
     , text

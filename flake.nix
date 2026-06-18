@@ -14,9 +14,14 @@
       url = "github:purescript/purescript/v0.15.16";
       flake = false;
     };
+
+    unison-nix = {
+      url = "github:ceedubs/unison-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, grace, purescript-src }:
+  outputs = { self, nixpkgs, flake-utils, grace, purescript-src, unison-nix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         compiler = "ghc96";
@@ -26,6 +31,7 @@
           config.allowBroken = true;
           overlays = [
             grace.overlays.${compiler}
+            unison-nix.overlay
 
             (final: prev:
               let hlib = final.haskell.lib;
@@ -74,6 +80,11 @@
             program = "${chase}/bin/chase-annotate";
           };
 
+          chase-unison = {
+            type    = "app";
+            program = "${chase}/bin/chase-unison";
+          };
+
           vendor-purescript-cst = {
             type = "app";
             program = toString (pkgs.writeShellScript "install-vendor-purescript-cst" ''
@@ -96,6 +107,18 @@
             haskell-language-server
             ghcid
             fourmolu
+            pkgs.unison-ucm
+            (pkgs.writeShellApplication {
+              name = "ucm-serve";
+              runtimeInputs = [ pkgs.unison-ucm ];
+              text = ''
+                # Starts the codebase server with no interactive REPL.
+                # ucm prints the API base URL (scheme://host:port/token) on
+                # startup; copy it and run:
+                #   chase-unison <thatUrl> <project> <branch> [namespace]
+                exec ucm headless "$@"
+              '';
+            })
           ];
 
           withHoogle = true;
