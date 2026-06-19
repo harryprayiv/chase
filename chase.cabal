@@ -121,7 +121,7 @@ library vendor-purescript-cst
 library chase-annotations
   import:           warnings
   visibility:       public
-  hs-source-dirs:   src-annotations
+  hs-source-dirs:   src/annotations
   default-extensions:
     LambdaCase
     OverloadedStrings
@@ -143,7 +143,7 @@ library chase-annotations
 
 library
   import:           warnings
-  hs-source-dirs:   src
+  hs-source-dirs:   src/core
   default-extensions:
     LambdaCase
     OverloadedStrings
@@ -185,7 +185,7 @@ library
 library chase-codebase
   import:           warnings
   visibility:       public
-  hs-source-dirs:   src-codebase
+  hs-source-dirs:   src/codebase
   exposed-modules:
     Chase.Unison.Api
     Chase.Unison.Extract
@@ -208,7 +208,7 @@ library chase-codebase
 library chase-grace-bridge
   import:           warnings
   visibility:       public
-  hs-source-dirs:   src-bridge
+  hs-source-dirs:   src/bridge
   exposed-modules:
     Chase.GraceBridge
   build-depends:
