@@ -1,32 +1,25 @@
+-- src-codebase/Chase/Unison/Api.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Client for the local Unison codebase HTTP API (the server ucm runs
--- for the Local UI). Decoders are deliberately minimal and tolerant of
--- unknown fields: we decode only what chase needs, so an API revision
--- that adds fields does not break us.
 module Chase.Unison.Api
   ( -- * Connection
     Codebase (..)
   , newCodebase
-    -- * Endpoints
   , listNamespace
   , getDefinition
+  , getDefinitions
   , getDependents
-    -- * Listing
   , Listing (..)
   , Child (..)
   , ChildKind (..)
-    -- * Definitions
   , DefinitionResponse (..)
   , TermDef (..)
   , TypeDef (..)
   , DisplayObject (..)
   , displayObjectSegments
-    -- * Dependents
   , Dependent (..)
-    -- * Syntax segments
   , Segment (..)
   , Annotation (..)
   , renderSegments
@@ -47,13 +40,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import Network.HTTP.Client
 import Network.HTTP.Types.Status (statusCode)
 
--- ---------------------------------------------------------------------------
--- Connection
--- ---------------------------------------------------------------------------
 
--- | A handle to one project/branch of a running codebase server.
--- 'cbBaseUrl' is everything up to and including the token, no trailing
--- slash, e.g. @http://127.0.0.1:5858/codebase@.
 data Codebase = Codebase
   { cbManager :: Manager
   , cbBaseUrl :: String
@@ -70,7 +57,6 @@ newCodebase baseUrl project branch = do
       ('/' : rest) -> reverse rest
       _            -> s
 
--- | GET an endpoint under the project/branch path, decode the JSON body.
 apiGet :: FromJSON a => Codebase -> String -> [(ByteString, Maybe Text)] -> IO (Either Text a)
 apiGet cb endpoint params = do
   let url = cbBaseUrl cb
@@ -100,33 +86,30 @@ mkParams = mapMaybe (\(k, mv) -> (\v -> (k, Just (TE.encodeUtf8 v))) <$> mv)
 showBody :: LBS.ByteString -> Text
 showBody = TE.decodeUtf8With TEE.lenientDecode . LBS.toStrict
 
--- ---------------------------------------------------------------------------
--- Endpoints
--- ---------------------------------------------------------------------------
 
--- | @list?namespace=&relativeTo=@. With no namespace, lists the branch root.
 listNamespace :: Codebase -> Maybe Text -> Maybe Text -> IO (Either Text Listing)
 listNamespace cb ns relTo =
   apiGet cb "list" [("namespace", ns), ("relativeTo", relTo)]
 
--- | @getDefinition?names=&relativeTo=@. A name beginning with @#@ is a hash;
--- query-string encoding is handled for you.
 getDefinition :: Codebase -> Text -> Maybe Text -> IO (Either Text DefinitionResponse)
 getDefinition cb name relTo =
   apiGet cb "getDefinition" [("names", Just name), ("relativeTo", relTo)]
 
--- | @getDefinitionDependents?name=@. The exact reverse-dependency edges.
+-- | Fetch many definitions in one request. The "names" query param is
+-- repeatable, so the server builds its pretty-print environment once and
+-- renders all requested names against it. The response is keyed by hash but
+-- each definition carries its own names, so callers match by name.
+getDefinitions :: Codebase -> [Text] -> Maybe Text -> IO (Either Text DefinitionResponse)
+getDefinitions cb names relTo =
+  apiGet cb "getDefinition"
+    ([ ("names", Just n) | n <- names ] ++ [ ("relativeTo", relTo) ])
+
 getDependents :: Codebase -> Text -> IO (Either Text [Dependent])
 getDependents cb name = do
   r <- apiGet cb "getDefinitionDependents" [("name", Just name)]
   pure (fmap depResults r)
 
--- ---------------------------------------------------------------------------
--- Syntax segments
--- ---------------------------------------------------------------------------
 
--- | One annotated chunk of rendered source. Concatenating 'segText' over a
--- list reproduces the source exactly.
 data Segment = Segment
   { segText       :: Text
   , segAnnotation :: Maybe Annotation
@@ -156,8 +139,6 @@ valueToText _          = Nothing
 renderSegments :: [Segment] -> Text
 renderSegments = T.concat . map segText
 
--- | (fqn, hash) for every reference-tagged segment. This is the dependency
--- set embedded in the rendered source itself, independent of getDependents.
 segmentRefs :: [Segment] -> [(Text, Text)]
 segmentRefs = mapMaybe $ \s -> do
   a <- segAnnotation s
@@ -165,9 +146,6 @@ segmentRefs = mapMaybe $ \s -> do
     then (,) <$> annFqn a <*> annContents a
     else Nothing
 
--- ---------------------------------------------------------------------------
--- Listing
--- ---------------------------------------------------------------------------
 
 data Listing = Listing
   { listFqn      :: Text
@@ -175,9 +153,6 @@ data Listing = Listing
   , listChildren :: [Child]
   } deriving (Show)
 
--- | Every child carries a name and hash; the variant-specific payload lives
--- in 'childKind'. Shared fields are total selectors; the kind sub-sum is
--- positional, so there are no partial record selectors.
 data Child = Child
   { childName :: Text
   , childHash :: Text
@@ -220,9 +195,6 @@ instance FromJSON Child where
         pure (Child n h (KNamespace sz))
       other -> fail ("unknown child tag: " <> T.unpack other)
 
--- ---------------------------------------------------------------------------
--- Definitions
--- ---------------------------------------------------------------------------
 
 data DefinitionResponse = DefinitionResponse
   { drMissing :: [Text]
@@ -230,7 +202,6 @@ data DefinitionResponse = DefinitionResponse
   , drTypes   :: Map Text TypeDef  -- ^ keyed by hash
   } deriving (Show)
 
--- | One hash, many names. 'tdNames' is the full alias set.
 data TermDef = TermDef
   { tdNames      :: [Text]
   , tdBestName   :: Text
@@ -246,7 +217,6 @@ data TypeDef = TypeDef
   , tydDefinition :: DisplayObject
   } deriving (Show)
 
--- | A rendered definition body, builtin marker, or a hash for a missing one.
 data DisplayObject
   = UserObject    [Segment]
   | BuiltinObject [Segment]
@@ -292,9 +262,6 @@ instance FromJSON DisplayObject where
       "MissingObject" -> MissingObject <$> o .: "contents"
       other           -> fail ("unknown DisplayObject tag: " <> T.unpack other)
 
--- ---------------------------------------------------------------------------
--- Dependents
--- ---------------------------------------------------------------------------
 
 data Dependent = Dependent
   { depFqn         :: Text

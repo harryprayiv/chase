@@ -1,0 +1,2412 @@
+%codebase uniDork/main
+%root (whole branch)
+%defs 963
+
+# chase-unison bundle: a structural skeleton of a Unison codebase,
+# one entry per definition, deduplicated by content hash.
+#   name : signature   ~hash     term; ~hash is the content address
+#   type[Tag] name     ~hash     type, followed by its declaration
+#     fields: a, b, c            record fields (generated accessors elided)
+#   > aka: other.name            another name for the same hash
+#   ! ...                        behavioral invariant (from annotations)
+#   > consumed by: ...           downstream dependent (from annotations)
+# %decision / %open_issue blocks at the end are architectural notes.
+# Lines from annotations appear only when an annotations file is supplied.
+
+type[Data] Actor   ~49khbgj7ca
+  type Actor = { name : Text, role : Text }
+  fields: name, role
+
+Actor.fromJson : '{unison_json_1_3_5.Decoder} Actor   ~5dt69ogslj
+
+Actor.toJson : Actor -> Json   ~dte8it22m9
+
+type[Data] Audio   ~m97r9blas5
+  type Audio = { codec : Text, language : Text, channels : Nat }
+  fields: channels, codec, language
+
+Audio.fromJson : '{unison_json_1_3_5.Decoder} Audio   ~l3e08gqgud
+
+Audio.toJson : Audio -> Json   ~kb76aht8ed
+
+type[Data] Config   ~adl6bagm88
+  type Config = { db : Db, cache : Cache, paths : Paths, tuning : Tuning }
+  fields: cache, db, paths, tuning
+
+type[Data] Config.Cache   ~2g0e5dt9pl
+  type Cache = Config.Cache.Cache Text Text
+  fields: ffprobeDir, stageDir
+
+type[Data] Config.Db   ~anefo4oe6k
+  type Db = Config.Db.Db Text Text Text Text
+  fields: host, name, port, user
+
+type[Data] Config.Paths   ~t43pif2i7r
+  type Paths
+    = Config.Paths.Paths Text Text Text Text Text Text Text Text Text Text Text
+  fields: buffer, intake, library, libraryConfig, movieFormat, subToken, tmdbToken, tvBuffer, tvFormat, tvIntake, tvLibrary
+
+type[Data] Config.Tuning   ~p24srlef1h
+  type Tuning = Config.Tuning.Tuning Nat [Text]
+  fields: probeJobs, subLangs
+
+Config.fromEnv : '{IO} Config   ~gmcoc20cda
+
+Config.getEnvOr : Text -> Text ->{IO} Text   ~cg0o7c2dpo
+
+Config.getLangsOr : Text -> [Text] ->{IO} [Text]   ~hpen8b9jbh
+
+Config.getNatOr : Text -> Nat ->{IO} Nat   ~kcsjlcquoa
+
+Config.nonEmpty : Text -> Optional Text   ~vitkc3nt2n
+
+Config.readSubToken : Config ->{IO, Exception} Text   ~knihjulnnt
+
+Config.readTmdbToken : Config ->{IO, Exception} Text   ~8puklppav0
+
+Config.toClientConfig : Config -> PostgresClientConfig   ~1u5tg0uvd5
+
+Db.associationsDdl : Text   ~nk61h2aq9c
+
+Db.cacheDdl : [Text]   ~1936bl6ho4
+
+Db.childDdl : [Text]   ~jfoehav0rr
+
+Db.createSchema : Config ->{IO, Exception} ()   ~7vk21v9mi7
+
+Db.deleteChildSql : Text -> Command a (Text ->{g, g1} a)   ~q4l8cj3k7r
+
+Db.dropDdl : [Text]   ~5heoa91vs5
+
+Db.editionsDdl : Text   ~hcbpqgd0e5
+
+Db.filesDdl : Text   ~gnko3euir3
+
+Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()   ~kvoac07pev
+
+Db.indexDdl : [Text]   ~89mbog2hjv
+
+Db.insertActorSql : Command b (Text ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Text ->{g, g1} b)   ~51sf1563ls
+
+Db.insertAudioSql : Command b (Text ->{g8, g9} Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} b)   ~3ri2dt7t2n
+
+Db.insertCountrySql : Command b (Text ->{g1} Text ->{g} b)   ~03t3poo5qo
+
+Db.insertCreditSql : Command b (Text ->{g1} Text ->{g} b)   ~8a3t209sge
+
+Db.insertDirectorSql : Command b (Text ->{g1} Text ->{g} b)   ~svjteq5k15
+
+Db.insertGenreSql : Command b (Text ->{g1} Text ->{g} b)   ~ua6geqtav7
+
+Db.insertPairSql : Text -> Text -> Command b (Text ->{g2, g3} Text ->{g, g1} b)   ~u3908n2jov
+
+Db.insertStudioSql : Command b (Text ->{g1} Text ->{g} b)   ~gfoqtq1c3t
+
+Db.insertSubSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~2fi9ri4j8t
+
+Db.insertTagSql : Command b (Text ->{g1} Text ->{g} b)   ~4b8fd4kgsp
+
+Db.insertVideoSql : Command b (Text ->{g8, g9} Text ->{g6, g7} Float ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} b)   ~8bcbhrarph
+
+Db.libraryMoviesDdl : Text   ~e4v1l9mutk
+
+Db.migrate : Config ->{IO, Exception} ()   ~4vobtt08is
+
+Db.pf : Float -> [Optional Text]   ~oa7op0rdqb
+
+Db.pi : Int -> [Optional Text]   ~8vdnlpjnl0
+
+Db.pobi : Optional Int -> [Optional Text]   ~qjqsvpp3on
+
+Db.poi : Optional Int -> [Optional Text]   ~0mk5vg2311
+
+Db.pot : Optional Text -> [Optional Text]   ~g2qsfc1jmb
+
+Db.probeCacheDdl : Text   ~hfi7mtfhm7
+
+Db.pt : Text -> [Optional Text]   ~niif2o0bu5
+
+Db.resetSchema : Config ->{IO, Exception} ()   ~aih5moruko
+
+Db.runDDL : Command [Optional Text] [Optional Text] ->{Postgres} ()   ~d7n55b812g
+
+Db.runDDLList : [Text] ->{Postgres} ()   ~v5kb0lc8o9
+
+Db.selectImportedCrcSql : postgres.Query a (Text ->{g, g1} a) Text   ~4g27jokd97
+
+Db.tmdbMoviesDdl : Text   ~1r23vn9hjc
+
+Db.upsertMovieSql : Command b (Text ->{g54, g55} Optional Text ->{g52, g53} Optional Int ->{g50, g51} Optional Text ->{g48, g49} Optional Text ->{g46, g47} Optional Text ->{g44, g45} Text ->{g42, g43} Text ->{g40, g41} Text ->{g38, g39} Optional Text ->{g36, g37} Optional Int ->{g34, g35} Float ->{g32, g33} Int ->{g30, g31} Text ->{g28, g29} Optional Int ->{g26, g27} Text ->{g24, g25} Text ->{g22, g23} Optional Text ->{g20, g21} Optional Text ->{g18, g19} Optional Text ->{g16, g17} Optional Int ->{g14, g15} Optional Text ->{g12, g13} Optional Text ->{g10, g11} Optional Text ->{g8, g9} Optional Text ->{g6, g7} Optional Int ->{g4, g5} Optional Int ->{g2, g3} Optional Int ->{g, g1} b)   ~ngp89m32oa
+
+Db.upsertWith : PreparedCommand r20 a20 -> PreparedCommand r19 a19 -> PreparedCommand r18 a18 -> PreparedCommand r17 a17 -> PreparedCommand r16 a16 -> PreparedCommand r15 a15 -> PreparedCommand r14 a14 -> PreparedCommand r13 a13 -> PreparedCommand r12 a12 -> PreparedCommand r11 a11 -> PreparedCommand r10 a10 -> PreparedCommand r9 a9 -> PreparedCommand r8 a8 -> PreparedCommand r7 a7 -> PreparedCommand r6 a6 -> PreparedCommand r5 a5 -> PreparedCommand r4 a4 -> PreparedCommand r3 a3 -> PreparedCommand r2 a2 -> PreparedCommand r1 a1 -> PreparedCommand r a -> Optional Text -> Optional Nat -> Optional Nat -> Movie ->{IO, Exception, Postgres} ()   ~n7c7scmqb8
+
+Db.versionsDdl : Text   ~poj2kjc0ek
+
+Db.withIndex : [a] -> [(Nat, a)]   ~9i4imah10g
+  > aka: Versions.withIndex
+
+type[Data] FileInfo   ~hgmk94lq8p
+  type FileInfo = { streams : StreamDetails }
+  fields: streams
+
+FileInfo.fromJson : '{unison_json_1_3_5.Decoder} FileInfo   ~n1fnua98ke
+
+FileInfo.toJson : FileInfo -> Json   ~6f67t6g7ak
+
+type[Data] FolderMeta   ~jehku5serf
+  type FolderMeta
+    = { rawSize : Optional Text,
+        resolution : Optional Text,
+        videoCodec : Optional Text,
+        bitDepth : Optional Nat,
+        runtimeMin : Optional Nat,
+        checksum : Optional Text }
+  fields: bitDepth, checksum, rawSize, resolution, runtimeMin, videoCodec
+
+FolderMeta.fromJson : '{unison_json_1_3_5.Decoder} FolderMeta   ~r6u7omuv99
+
+FolderMeta.toJson : FolderMeta -> Json   ~vmp2osiec7
+
+List.chunk : Nat -> [a] -> [[a]]   ~gnpvpr1j85
+
+List.distinctText : [Text] -> [Text]   ~svr81l04j4
+
+type[Data] Move.FileIdentity   ~qoov0qbhlk
+  type FileIdentity = Move.FileIdentity.FileIdentity Int Text Int Text
+  fields: crc32, fileId, originalName, sizeBytes
+
+Move.commitFolder : Text -> Text ->{IO} Either Text ()   ~clohiqd1do
+
+Move.deviceOf : Text ->{IO} Optional Text   ~2vep5tame8
+
+Move.enforceUnderRoot : Text -> Text -> Boolean   ~l6o7arkjhl
+
+Move.ensureDir : Text ->{IO, Exception} ()   ~s43mfq5q11
+
+Move.epochSeconds : '{IO} Nat   ~0mf11a9g96
+
+Move.folderVideoBytes : FilePath ->{IO, Exception} Nat   ~24pj2tf08l
+
+Move.loadIdentity : PreparedQuery r a (((Int, Text), Int), Text) -> Text ->{Postgres} Optional FileIdentity   ~8104lk71i8
+
+Move.moveChunkSize : Nat   ~q113fknr5u
+
+Move.moveFolder : Boolean -> Text -> FilePath ->{IO, MovieMoveCatalog, Exception} ()   ~aau8q91ffs
+
+Move.partialRoot : Text -> Text   ~2va75luao3
+
+Move.planOne : Text -> Optional a -> FilePath ->{IO, Exception} ()   ~dgq1rebcfa
+
+Move.printProgress : Nat -> Nat -> Nat -> mutable.Ref g (Nat, Nat) ->{g, IO, Exception} ()   ~pkshru0r1r
+
+Move.removeFolderTree : Text ->{IO} Either Text ()   ~hkp4ikr7ho
+
+Move.rmdirFolder : Text ->{IO} ()   ~ht3pscpian
+
+Move.rowToIdentity : (((Int, Text), Int), Text) -> FileIdentity   ~h79f8ctm92
+
+Move.rsyncFolder : Text -> Text ->{IO} Either Text ()   ~lh57b8sisj
+
+Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()   ~62hif2osdt
+
+Move.sameDevice : Text -> Text ->{IO} Boolean   ~phl4vdn43c
+
+Move.selectFileByPathSql : postgres.Query a (Text ->{g, g1} a) (((Int, Text), Int), Text)   ~9c3o518g4i
+
+Move.sweepPartial : Text ->{IO, Exception} ()   ~hqr529bm0s
+
+Move.transferFolder : Boolean -> Text -> Text -> Text ->{IO, Exception} Boolean   ~tvetsc0t9r
+
+Move.updateFilePathSql : Command a (Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)   ~reqgc43nrl
+
+Move.updateMovieFile : Text -> Text -> Text -> Boolean -> Optional FileIdentity ->{IO, MovieMoveCatalog, Exception} ()   ~n4qqos6hf7
+
+Move.verifyFile : Text ->{IO, MovieMoveCatalog, Exception} (Text, Boolean, Optional FileIdentity)   ~8mmodrjaqp
+
+type[Data] Movie   ~i31jp0qlep
+  type Movie
+    = { id : MovieId,
+        title : Title,
+        collection : Optional Text,
+        runtime : Optional Nat,
+        scoring : Scoring,
+        plot : Text,
+        tagline : Text,
+        taxonomy : Taxonomy,
+        fileInfo : FileInfo,
+        videoFilePath : Optional Text,
+        checksum : Optional Text,
+        actors : [Actor],
+        folderPath : Optional Text,
+        nfoPath : Optional Text,
+        fileSizeBytes : Optional Nat,
+        folderMeta : FolderMeta }
+  fields: actors, checksum, collection, fileInfo, fileSizeBytes, folderMeta, folderPath, id, nfoPath, plot, runtime, scoring, tagline, taxonomy, title, videoFilePath
+
+Movie.fromJson : '{unison_json_1_3_5.Decoder} Movie   ~7dgc4n4ajb
+
+Movie.fromNdjsonLine : Text -> Either Failure Movie   ~eb9r98ruuq
+
+Movie.roundtrip.test : [test.Result]   ~cj3fk3fott
+
+Movie.toJson : Movie -> Json   ~6ipvjrnbrd
+
+Movie.toNdjsonLine : Movie -> Text   ~eh9nso0uld
+
+type[Data] MovieId   ~ra9q5rk9lq
+  type MovieId
+    = { kodi : Text,
+        imdb : Optional Text,
+        tmdb : Optional Text,
+        tvdb : Optional Text }
+  fields: imdb, kodi, tmdb, tvdb
+
+MovieId.fromJson : '{unison_json_1_3_5.Decoder} MovieId   ~e3co3cccgt
+
+MovieId.toJson : MovieId -> Json   ~p38hb7e76h
+
+Nfo.actorBlock : (Text, Text) -> [Text]   ~a5u6cs5c7s
+
+Nfo.allText : Soup ->{Throw XMLError} Text   ~mpf6g2epuu
+
+Nfo.aspectRatio : Nat -> Nat -> Text   ~ssia1qldie
+
+Nfo.aspectRatio.test : [test.Result]   ~m1a7u45mcf
+
+Nfo.audioBlock : AudioInfo -> [Text]   ~g2ehc8l8bh
+
+Nfo.containsText : Text -> Text -> Boolean   ~s50ujbvt3n
+
+Nfo.countryLine : Text -> Text   ~r7m97n8g0c
+
+Nfo.descendantAttr : Text -> Text -> Soup -> Optional Text   ~2rak43v0tk
+
+Nfo.directorLine : Text -> Text   ~menkld0u82
+
+Nfo.extractImdbId : Movie -> Optional Text   ~so57rlhdk8
+
+Nfo.extractTitle : Movie -> Optional Text   ~tdloh0blpa
+
+Nfo.extractTmdbId : Movie -> Optional Nat   ~56ran8k45f
+
+Nfo.extractYear : Movie -> Optional Nat   ~f2cg854sav
+
+Nfo.fileinfoBlock : ProbeResult -> [Text]   ~7uocufkurb
+
+Nfo.firstPresent : [Text] -> Text -> Optional Text   ~iuflgfo3eu
+
+Nfo.floatOr : Float -> Text -> Float   ~j8i8j0bpqd
+
+Nfo.generate : Tmdb.Result -> Details -> ProbeResult -> Text   ~9ev56ppvd7
+
+Nfo.genreLine : Text -> Text   ~n8j5532j5p
+
+Nfo.natOr : Nat -> Text -> Nat   ~is0c5glbgt
+
+Nfo.optText : Text -> Soup -> Optional Text   ~90kvm197jb
+
+Nfo.padLeft : Nat -> Text -> Text -> Text   ~d69q4pqufc
+
+Nfo.parse : Text -> Either Text Movie   ~dq2pgr4ht7
+
+Nfo.parse.test : [test.Result]   ~ucaduhrqle
+
+Nfo.parseActor : Soup ->{Throw XMLError} Actor   ~o5aclpg6j4
+
+Nfo.parseActors : Soup -> [Actor]   ~vhmhgqp1hn
+
+Nfo.parseAudio : Soup ->{Throw XMLError} Audio   ~30ov05mrja
+
+Nfo.parseCollection : Soup -> Optional Text   ~b5pp79qhur
+
+Nfo.parseFileInfo : Soup ->{Throw XMLError} FileInfo   ~ca7stfmbe6
+
+Nfo.parseFolderName : Text -> FolderMeta   ~q9ecep2cba
+
+Nfo.parseFolderName.test : [test.Result]   ~aca1tevvjc
+
+Nfo.parseMovie : Soup ->{Throw XMLError} Movie   ~osippugv29
+
+Nfo.parseMovieId : Soup ->{Throw XMLError} MovieId   ~v8radu78fs
+
+Nfo.parseRatingAndVotes : Soup -> (Float, Nat)   ~kl7tmp4upi
+
+Nfo.parseScoring : Soup ->{Throw XMLError} Scoring   ~iobue2hcc7
+
+Nfo.parseStreamDetails : Soup ->{Throw XMLError} StreamDetails   ~bl3c9g1ccl
+
+Nfo.parseSubtitle : Soup ->{Throw XMLError} Subtitle   ~0moum5ll41
+
+Nfo.parseTaxonomy : Soup -> Taxonomy   ~pufk0j19a3
+
+Nfo.parseTitle : Soup ->{Throw XMLError} Title   ~pb9esgibm4
+
+Nfo.parseVideo : Soup ->{Throw XMLError} Video   ~4v72akuo3m
+
+Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie   ~3uum837bf6
+
+Nfo.runtimeFromContent : Text -> Optional Nat   ~tcfgqfqc7p
+
+Nfo.sizeStrFromContent : Text -> Optional Text   ~nhv0gafl2e
+
+Nfo.sortTitle : Text -> Text -> Text   ~5pnje0fi0s
+
+Nfo.sortTitle.test : [test.Result]   ~cstfpfla8e
+
+Nfo.studioLine : Text -> Text   ~t1fd9t7s6c
+
+Nfo.subtitleBlock : SubtitleInfo -> [Text]   ~3k6gqdttd7
+
+Nfo.tagLine : Text -> Text   ~889bgoum32
+
+Nfo.textOr : Text -> Text -> Soup -> Text   ~4msc724mtq
+
+Nfo.texts : Text -> Soup -> [Text]   ~sg88cvlhvh
+
+Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie   ~m2374i2uio
+
+Nfo.uniqueIdOfType : Text -> Soup -> Optional Text   ~sln3onojtg
+
+Nfo.writerLine : Text -> Text   ~ne3gdj7hdm
+
+type[Data] Probe.AudioTrack   ~poesjhgi20
+  type AudioTrack
+    = Probe.AudioTrack.AudioTrack
+        Nat Text (Optional Text) (Optional Text) Nat Text Boolean Boolean Boolean
+  fields: channelLayout, channels, codec, index, isComment, isDefault, isVisualImpaired, language, title
+
+Probe.AudioTrack.fromJson : '{unison_json_1_3_5.Decoder} AudioTrack   ~m7oulhtg5e
+
+type[Data] Probe.Format   ~og0lmaj011
+  type Format = Probe.Format.Format Float (Optional Nat) (Optional Nat)
+  fields: bitRate, duration, sizeBytes
+
+Probe.Format.fromJson : '{unison_json_1_3_5.Decoder} Format   ~4i81tgo7ss
+
+type[Data] Probe.Result   ~1pen9442ig
+  type Probe.Result = { format : Format }
+  fields: format
+
+Probe.optNatStringAt : Text ->{unison_json_1_3_5.Decoder} Optional Nat   ~7svir1kq08
+
+Probe.parseFloat : Text -> Float   ~cl9m3jf41j
+
+Progress.report : Text -> Nat -> Nat -> Nat -> mutable.Ref g (Nat, Nat) ->{g, IO, Exception} ()   ~4og9hkt5p9
+
+README : Doc   ~db95ublt5g
+
+type[Data] Relang.Decision   ~n8d29hurdh
+  type Decision
+    = Relang.Decision.AlreadyCorrect Nat
+    | Relang.Decision.NoCurrentDefault Nat
+    | Relang.Decision.OriginalNotPresent Text
+    | Relang.Decision.UnsupportedLanguage Text
+    | Relang.Decision.SwitchTo Nat Nat
+
+Relang.Decision.toJson : Decision -> Json   ~2e9q0i9md8
+
+Relang.bestOf : [AudioTrack] -> Optional AudioTrack   ~7on2b30k26
+
+Relang.betterThan : AudioTrack -> AudioTrack -> Boolean   ~c3k4dcgubn
+
+Relang.codecRank : Text -> Nat   ~7bq2kd2ll0
+
+Relang.containsAnySubstring : [Text] -> Text -> Boolean   ~ngqh00i4mg
+
+Relang.currentDefault : [AudioTrack] -> Optional Nat   ~dq09hfqai8
+
+Relang.decide : Text -> [AudioTrack] -> Decision   ~585qgsi4s2
+
+Relang.isCommentaryOrDescriptive : AudioTrack -> Boolean   ~kvhv85hnas
+
+Relang.losslessCodecs : [Text]   ~159iu35op7
+
+Relang.lossyCodecs : [Text]   ~24mu9dorug
+
+Relang.selectTrack : Text -> [AudioTrack] -> Optional AudioTrack   ~rn5bpuk3cf
+
+Relang.splitMany : [Char] -> Text -> [Text]   ~f9k9aninrk
+
+Relang.titleAliases : Text -> [Text]   ~5aui2senpl
+
+Relang.titleMatches : Text -> AudioTrack -> Boolean   ~jt17shnulu
+
+Relang.titleSeparators : [Char]   ~kgomg7lmoc
+
+Relang.titleSuggestsCommentary : Text -> Boolean   ~ajci0qn2b0
+
+Relang.toIso6392 : Text -> Optional Text   ~evm1i2o0jd
+
+ReleaseNotes : Doc   ~vo4aua62d2
+
+type[Data] Rename.FormatPart   ~jskk2pj0pi
+  type FormatPart = Rename.FormatPart.Literal Text | Rename.FormatPart.Token Text
+
+type[Data] Rename.MovieRecord   ~rlr35hclj9
+  type MovieRecord
+    = Rename.MovieRecord.MovieRecord Nat (Optional Text) Text (Optional Nat)
+  fields: imdbId, title, tmdbId, year
+
+type[Data] Rename.Outcome   ~q1hqrqa747
+  type Rename.Outcome
+    = NoVideo Text
+    | NoProbe Text
+    | AlreadyDone Text
+    | Renamed Text Text
+    | NoMatch Text Text
+    | Conflict Text Text
+    | RenameError Text Text
+    | DuplicateRemoved Text Text
+    | WouldRename Text Text
+    | WouldRemoveDuplicate Text Text
+
+type[Data] Rename.RenameRow   ~f6btv663e6
+  type RenameRow
+    = Rename.RenameRow.RenameRow
+        Text Text Text Nat (Optional Text) Text (Optional Nat) Text
+  fields: crc32, detailsJson, imdbId, originalPath, probeJson, title, tmdbId, year
+
+Rename.acTag : Text -> Text   ~6s1hre070f
+
+Rename.anySizeMatch : FilePath -> Nat -> [Text] ->{IO} Boolean   ~28vs7e5u7f
+
+Rename.basenameNoExt : Text -> Text   ~03ko07fevm
+
+Rename.channelsTag : Nat -> Text   ~sp4bjnq21h
+
+Rename.channelsTag.test : [test.Result]   ~td8ftdjaf0
+
+Rename.collapseSpaces : Text -> Text   ~gvqtifptf9
+
+Rename.crcTaggedEntries : FilePath -> Text ->{IO, Exception} [Text]   ~c095abguma
+
+Rename.deleteProbeCacheSql : Command a (Text ->{g, g1} a)   ~r2gb64f2kl
+
+Rename.effectiveBitRate : Optional Nat -> Nat -> Float -> Nat   ~kkohp1631r
+
+Rename.escapeXml : Text -> Text   ~3tqqeqctg8
+
+Rename.executeOne : Boolean -> Text -> [FormatPart] -> [FormatPart] -> Optional Text -> [Text] -> RenameRow ->{IO, Exception, RenameCatalog} Rename.Outcome   ~uc8bv29vdf
+
+Rename.fileExt : Text -> Text   ~6pnnrd87hc
+
+Rename.gigabytes : Nat -> Text   ~arcf4824na
+
+Rename.gigabytes.test : [test.Result]   ~sg280m48mn
+
+Rename.isLikelyGroupToken : Text -> Boolean   ~5evodrfoac
+
+Rename.logSubOutcomes : [SaveOutcome] ->{IO, Exception} ()   ~coik5pu04g
+
+Rename.looseVideos : FilePath ->{IO, Exception} [FilePath]   ~d4o805jptm
+
+Rename.maybeFetchSubsM : Optional Text -> [Text] -> MovieRecord -> FilePath -> Text ->{IO, Exception} ()   ~k6jt6rbsk3
+
+Rename.mbps : Nat -> Text   ~4kvvhqgh8i
+
+Rename.mbps.test : [test.Result]   ~p8gdm2m1e9
+
+Rename.minimalNfoM : MovieRecord -> Text -> Text   ~dn61c5t05k
+
+Rename.minutes : Float -> Nat   ~6bikmuahap
+
+Rename.nfoBase : Text -> Text   ~mnsf4gecsn
+
+Rename.parentDir : FilePath -> FilePath   ~irnldrq24a
+
+Rename.parseFormat : Text -> [FormatPart]   ~ic897ut0kc
+
+Rename.parseFormat.test : [test.Result]   ~s2i8kp3893
+
+Rename.parseSegment : Text -> [FormatPart]   ~6gbg2cb92j
+
+Rename.pathExists : FilePath ->{IO, Exception} Boolean   ~hs73gh8qcc
+
+Rename.priorProposedWith : PreparedQuery r a b -> Text ->{Postgres} Optional b   ~hlrl2nffci
+  > aka: Rename.findPriorTargetForCrcWith
+
+Rename.promoteToBufferSql : Command a (Text ->{g10, g11} Text ->{g8, g9} Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)   ~i79o3n2s6v
+
+Rename.renderName : [FormatPart] -> MovieRecord -> ProbeResult -> Text   ~sbqms0r7al
+
+Rename.resolutionStr : Nat -> Nat -> Text   ~n3qctr3r05
+
+Rename.resolveTokenM : MovieRecord -> ProbeResult -> Text -> Text   ~qdmd11lmqc
+
+Rename.resultFromDetails : Details -> Tmdb.Result   ~kl1s5o3hn2
+
+Rename.rowToRenameRow : (((((((Text, Text), Text), Int), Optional Text), Text), Optional Int), Text) -> RenameRow   ~58lsopef00
+
+Rename.runNew : Config -> Text -> Text -> Boolean -> '{IO, Exception} ()   ~u7j0qt9ba7
+
+Rename.runStep : Boolean -> Text -> [FormatPart] -> [FormatPart] -> Optional Text -> [Text] -> RenameRow ->{IO, Exception, RenameCatalog} ()   ~jaeoon2i1r
+
+Rename.sanitize : Text -> Text   ~mi4u73aj3h
+
+Rename.selectProposedSql : postgres.Query b (Text ->{g, g1} b) Text   ~vus25aq1uo
+
+Rename.selectRenamableSql : postgres.Query r r (((((((Text, Text), Text), Int), Optional Text), Text), Optional Int), Text)   ~q82mmvhhs2
+
+Rename.shrink : Text -> Text -> Text -> Text   ~0371q24i64
+
+Rename.tighten : Text -> Text   ~gbm358neq5
+
+Rename.tighten.test : [test.Result]   ~cvsgsd6455
+
+Rename.titleYearM : MovieRecord -> Text   ~bfoqsk5ub2
+
+Rename.toMovieRecord : RenameRow -> MovieRecord   ~o1jvvumlpb
+
+Rename.truncSec : Float -> Nat   ~3lugem8j6e
+  > aka: Rename.durationSeconds
+
+Rename.vcTag : Text -> Text   ~ei4f6a3q7e
+
+Rename.vcTag.test : [test.Result]   ~uksin1agh6
+
+Rename.vfTag : Nat -> Nat -> Text   ~ns6b9eo405
+
+Rename.vfTag.test : [test.Result]   ~vb8e8vsqm5
+
+type[Data] Resolve.FileRow   ~tod0kfldi9
+  type Resolve.FileRow
+    = { fileId : Int,
+        originalName : Text,
+        durationSec : Float,
+        hintTitle : Optional Text,
+        hintYear : Optional Nat,
+        hintTmdbId : Optional Nat }
+  fields: durationSec, fileId, hintTitle, hintTmdbId, hintYear, originalName
+
+type[Data] Resolve.Outcome   ~vks4jqr3k9
+  type Resolve.Outcome
+    = NoHint Int
+    | NoTmdbMatch Int
+    | ResolvedById Int Nat
+    | ResolvedBySearch Int Nat Nat
+    | SearchError Int Text
+
+Resolve.deleteOtherAssociationsSql : Command a (Int ->{g2, g3} Int ->{g, g1} a)   ~f62qd2jra6
+
+Resolve.ensureMovie : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Boolean   ~3ulqaqlsha
+
+Resolve.optIntToNat : Optional Int -> Optional Nat   ~8hooqmm21n
+
+Resolve.printOutcome : Resolve.Outcome ->{IO, Exception} ()   ~0m4aim4bp0
+
+Resolve.resolveOne : Boolean -> Text -> Resolve.FileRow ->{MetaApi, ResolveCatalog} Resolve.Outcome   ~2phkssaoqm
+
+Resolve.resolveOne.dryRunNoWrite.test : [test.Result]   ~8vm0ipe07n
+
+Resolve.resolveOne.nfoId.test : [test.Result]   ~d5lt3i9jbr
+
+Resolve.resolveOne.noHint.test : [test.Result]   ~87rp8qlrt3
+
+Resolve.resolveOne.search.test : [test.Result]   ~1q2utirha5
+
+Resolve.rowToFile : (((((Int, Text), Float), Optional Text), Optional Int), Optional Int) -> Resolve.FileRow   ~eokr3ff1n9
+
+Resolve.runWith : Boolean -> Config ->{IO, Exception} ()   ~vtlvvatqa3
+
+Resolve.selectUnresolvedSql : postgres.Query r r (((((Int, Text), Float), Optional Text), Optional Int), Optional Int)   ~p4aaavtbkm
+
+Resolve.upsertAssociationSql : Command b (Int ->{g6, g7} Int ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~alb899or1d
+
+Resolve.writeMatch : PreparedCommand r1 a1 -> PreparedCommand r a -> Int -> Nat -> Nat -> Text ->{Postgres} ()   ~03hu3ulvil
+
+type[Data] Scoring   ~njhkbur9uh
+  type Scoring
+    = { year : Optional Nat, rating : Float, votes : Nat, mpaa : Text }
+  fields: mpaa, rating, votes, year
+
+Scoring.fromJson : '{unison_json_1_3_5.Decoder} Scoring   ~qdn424piil
+
+Scoring.toJson : Scoring -> Json   ~nch0c0gutr
+
+type[Data] Stage.AudioInfo   ~5b375ps7eo
+  type AudioInfo = Stage.AudioInfo.AudioInfo Text Nat Text Text
+  fields: channelLayout, channels, codec, language
+
+Stage.AudioInfo.fromJson : '{unison_json_1_3_5.Decoder} AudioInfo   ~965jq8pdmm
+
+Stage.AudioInfo.toJson : AudioInfo -> Json   ~08i10bfn3s
+
+type[Data] Stage.ProbeResult   ~g7lei427i6
+  type ProbeResult
+    = Stage.ProbeResult.ProbeResult
+        Text Text Nat Float VideoInfo [AudioInfo] [SubtitleInfo]
+  fields: audios, crc32, durationSec, sizeBytes, subtitles, video, videoPath
+
+Stage.ProbeResult.fromJson : '{unison_json_1_3_5.Decoder} ProbeResult   ~q4jrni7tvb
+
+Stage.ProbeResult.primaryAudio : ProbeResult -> Optional AudioInfo   ~p4v3k4igr1
+
+Stage.ProbeResult.toJson : ProbeResult -> Json   ~9stik8dt0k
+
+type[Data] Stage.RawFormat   ~lh8oua9p0t
+  type RawFormat = Stage.RawFormat.RawFormat Nat Float
+  fields: durationSec, sizeBytes
+
+Stage.RawFormat.fromJson : '{unison_json_1_3_5.Decoder} RawFormat   ~d2jr0vlhbq
+
+type[Data] Stage.RawProbe   ~fnp17mrlh5
+  type RawProbe = Stage.RawProbe.RawProbe [RawStream] RawFormat
+  fields: format, streams
+
+Stage.RawProbe.fromJson : '{unison_json_1_3_5.Decoder} RawProbe   ~p8mc3eh3da
+
+type[Data] Stage.RawStream   ~i23li16869
+  type RawStream
+    = Stage.RawStream.RawStream
+        Text Text Nat Nat Text (Optional Nat) (Optional Nat) Nat Text Text Text
+  fields: avgFrameRate, bitRate, bitsPerRawSample, channelLayout, channels, codecName, codecType, height, language, pixFmt, width
+
+Stage.RawStream.fromJson : '{unison_json_1_3_5.Decoder} RawStream   ~evncjfi8la
+
+type[Data] Stage.SubtitleInfo   ~p07hon46ga
+  type SubtitleInfo = Stage.SubtitleInfo.SubtitleInfo Text Text
+  fields: codec, language
+
+Stage.SubtitleInfo.fromJson : '{unison_json_1_3_5.Decoder} SubtitleInfo   ~vomqn3krjd
+
+Stage.SubtitleInfo.toJson : SubtitleInfo -> Json   ~0sq3dmvt3k
+
+type[Data] Stage.VideoInfo   ~t9sp47p8em
+  type VideoInfo
+    = Stage.VideoInfo.VideoInfo Text Nat Nat Nat Text (Optional Nat) Float
+  fields: bitDepth, bitRate, codec, fps, height, pixFmt, width
+
+Stage.VideoInfo.fromJson : '{unison_json_1_3_5.Decoder} VideoInfo   ~m4b97o5itr
+
+Stage.VideoInfo.toJson : VideoInfo -> Json   ~rp5qic2lqi
+
+Stage.bitDepthFrom : Optional Nat -> Text -> Nat   ~3vihkgi127
+
+Stage.bitDepthFrom.test : [test.Result]   ~s1lc9es079
+
+Stage.collectWork : FilePath ->{IO, Exception} [(Optional Text, Text)]   ~4301vl7mak
+
+Stage.drainHandle : Handle ->{IO, Exception} Text   ~nsfv4rt3ca
+
+Stage.emptyRawFormat : RawFormat   ~ck1a0cieoq
+
+Stage.exampleFfprobeJson : Text   ~1rbo4llbiv
+
+Stage.ffprobeArgs : Text -> [Text]   ~iivt24m561
+
+Stage.fileStat : Text ->{IO} Optional (Int, Nat)   ~ggkl0vcup3
+
+Stage.forkChunk : [(a, Text)] ->{IO, Exception} [(a, Text, Either Text ProbeResult)]   ~ahl4lsmqih
+
+Stage.forkProbe : (a, Text) ->{IO} concurrent.Promise (a, Text, Either Text ProbeResult)   ~6nkv0kj1kb
+
+Stage.fromRaw : Text -> Text -> RawProbe -> ProbeResult   ~705ksrhd6c
+
+Stage.fromRaw.test : [test.Result]   ~f0utsigcfl
+
+Stage.fromRawTracks.test : [test.Result]   ~u355l198t3
+
+Stage.insertBySize : (Nat, a) -> [(Nat, a)] -> [(Nat, a)]   ~ilbfu9f7re
+
+Stage.isFileCachedWith : PreparedQuery r a Int -> Text -> Int -> Int ->{Postgres} Boolean   ~vm2633fm8k
+
+Stage.nfoHint : Text ->{IO, Exception} (Optional Text, Optional Nat, Optional Nat)   ~bptngnh4c3
+
+Stage.parseNatString : Optional Text -> Optional Nat   ~48gj9ok8cd
+
+Stage.partitionWork : PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(Nat, (a, Text))]   ~a9nuag2jch
+
+Stage.probeCacheFreshSql : postgres.Query a (Text ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} a) Int   ~q4bo7nh1bv
+
+Stage.probeJsonRoundtrip.test : [test.Result]   ~7ehqjs3m15
+
+Stage.probeViaFfprobe : Text -> Text ->{IO, Exception} Either Text ProbeResult   ~8s5m3oslbn
+
+Stage.probeWithCrc : Text ->{IO, Exception} Either Text ProbeResult   ~f94hgru00b
+
+Stage.readWith : PreparedQuery r a Text -> Text ->{Postgres} Optional ProbeResult   ~2f8ni24nai
+
+Stage.runChunk : Text -> PreparedCommand r1 a2 -> PreparedCommand r a1 -> [(a, Text)] ->{IO, Exception, Postgres} ()   ~kub7fv99ck
+
+Stage.runFfprobe : Text ->{IO} Either Text Text   ~ch6ijrqakn
+
+Stage.runProbeAt : Config -> Text -> Text ->{IO, Exception} ()   ~bgefklql3q
+
+Stage.runProbeStage : Config ->{IO, Exception} ()   ~b2mc0ksf7f
+
+Stage.runRhashCrc32 : Text ->{IO} Either Text Text   ~vv633a2oq1
+
+Stage.sortBySize : [(Nat, a)] -> [(Nat, a)]   ~mm5at9mdpg
+
+Stage.statField : Text -> Text ->{IO} Optional Text   ~3q6onoll56
+
+Stage.tagLanguage : '{unison_json_1_3_5.Decoder} Text   ~e6pr340m9l
+
+Stage.upsertFileSql : Command b (Text ->{g26, g27} Int ->{g24, g25} Text ->{g22, g23} Text ->{g20, g21} Float ->{g18, g19} Text ->{g16, g17} Int ->{g14, g15} Int ->{g12, g13} Int ->{g10, g11} Text ->{g8, g9} Optional Text ->{g6, g7} Optional Int ->{g4, g5} Optional Int ->{g2, g3} Text ->{g, g1} b)   ~3reitprm9f
+
+Stage.upsertFileWith : PreparedCommand r a -> Text -> Text -> (Optional Text, Optional Nat, Optional Nat) -> Text -> ProbeResult ->{Postgres} ()   ~nv0j8ehdad
+
+Stage.upsertProbeCacheSql : Command b (Text ->{g8, g9} Int ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} b)   ~tdn8h5b98t
+
+Stage.upsertProbeCacheWith : PreparedCommand r a -> Text -> Int -> ProbeResult ->{Postgres} ()   ~pkljb32dh8
+
+type[Data] StreamDetails   ~kc413mefi2
+  type StreamDetails
+    = { video : Video, audios : [Audio], subtitles : [Subtitle] }
+  fields: audios, subtitles, video
+
+StreamDetails.fromJson : '{unison_json_1_3_5.Decoder} StreamDetails   ~b47un2s2g7
+
+StreamDetails.toJson : StreamDetails -> Json   ~0k4ofkp31d
+
+type[Data] Subs.MovieResult   ~la1ihtniup
+  type MovieResult
+    = Subs.MovieResult.MovieResult
+        (Optional Text) (Optional Nat) (Optional Nat) Text Text (Optional Nat)
+  fields: imdbId, kind, name, sdId, tmdbId, year
+
+Subs.MovieResult.fromJson : '{unison_json_1_3_5.Decoder} MovieResult   ~prav8r6hcl
+
+type[Data] Subs.SaveOutcome   ~l4tocmq6o2
+  type SaveOutcome
+    = Subs.SaveOutcome.NotFound Text
+    | Subs.SaveOutcome.Saved Text Text
+    | Subs.SaveOutcome.Errored Text Text
+
+type[Data] Subs.SearchResponse   ~2c81b2a26h
+  type Subs.SearchResponse
+    = { ok : Boolean,
+        error : Optional Text,
+        results : [MovieResult],
+        subtitles : [SubtitleItem] }
+  fields: error, ok, results, subtitles
+
+Subs.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Subs.SearchResponse   ~ngamro7gmb
+
+type[Data] Subs.SubtitleItem   ~tsk5k2gnef
+  type SubtitleItem
+    = Subs.SubtitleItem.SubtitleItem
+        Text
+        Text
+        Text
+        (Optional Text)
+        (Optional Boolean)
+        (Optional Boolean)
+        (Optional Nat)
+        (Optional Nat)
+        [UnpackFile]
+  fields: episode, fileName, fullSeason, hearingImpaired, language, releaseName, season, unpackFiles, urlPath
+
+Subs.SubtitleItem.downloadURI : SubtitleItem -> URI   ~fspqosuk8n
+
+Subs.SubtitleItem.fromJson : '{unison_json_1_3_5.Decoder} SubtitleItem   ~lklea3tlms
+
+type[Data] Subs.UnpackFile   ~hj2as3trps
+  type UnpackFile
+    = Subs.UnpackFile.UnpackFile Text Text Text Text Text Boolean Nat Text
+  fields: fileNId, format, hearingImpaired, language, name, releaseName, size, urlPath
+
+Subs.UnpackFile.downloadURI : UnpackFile -> URI   ~d3emiene1e
+
+Subs.UnpackFile.fromJson : '{unison_json_1_3_5.Decoder} UnpackFile   ~3pkn99hodc
+
+Subs.allUnpackFiles : Subs.SearchResponse -> [UnpackFile]   ~f86f1g2k36
+
+Subs.apiAuthority : Authority   ~uvtn30htdh
+
+Subs.downloadAuthority : Authority   ~8id0vcm7ft
+
+Subs.downloadURI : Text -> URI   ~h8d15dhr82
+
+Subs.downloadUnpackRaw : UnpackFile ->{IO} Either Text Text   ~9etareb286
+
+Subs.exampleSearchJson : Text   ~jf1h85oj2m
+
+Subs.exampleUnpackedJson : Text   ~2flqm95k5r
+
+Subs.fetchAndSaveByImdb : Text -> Text -> FilePath -> Text -> [Text] ->{IO} [SaveOutcome]   ~n1p72aosbp
+
+Subs.fetchAndSaveByTmdb : Text -> Nat -> FilePath -> Text -> [Text] ->{IO} [SaveOutcome]   ~9p92ts03d3
+
+Subs.imdbSearchURI : Text -> Text -> Text -> URI   ~cjkiup0chp
+
+Subs.isFullSeason : SubtitleItem -> Boolean   ~h9kun40uqm
+
+Subs.isHi : SubtitleItem -> Boolean   ~n1srpecf9f
+
+Subs.languageMatches : Text -> SubtitleItem -> Boolean   ~l3r1r4r1tu
+
+Subs.languagesParam : [Text] -> Text   ~jrcont4fdt
+
+Subs.languagesParam.test : [test.Result]   ~f8t5l8hj20
+
+Subs.normLang : Text -> Text   ~psp3r1pem0
+
+Subs.parseMovieFields.test : [test.Result]   ~v73fcir3ta
+
+Subs.parseShape.test : [test.Result]   ~l850csnm6d
+
+Subs.parseUnpacked.test : [test.Result]   ~fds0q1fjlg
+
+Subs.pickBestDropsFullSeason.test : [test.Result]   ~qbqodsup7c
+
+Subs.pickBestEmpty.test : [test.Result]   ~hq3gimhgut
+
+Subs.pickBestFallsBackToHi.test : [test.Result]   ~0pgsce5vo1
+
+Subs.pickBestForMovie : Text -> [SubtitleItem] -> Optional SubtitleItem   ~u76akmtvjq
+
+Subs.pickBestLanguageFallback.test : [test.Result]   ~4bhs785d8i
+
+Subs.pickBestPrefersNonHi.test : [test.Result]   ~9lr3crmo22
+
+Subs.pickUnpackFallsBackToHi.test : [test.Result]   ~ivuvl6i62n
+
+Subs.pickUnpackForLanguage : Text -> [UnpackFile] -> Optional UnpackFile   ~hbs97qdqnf
+
+Subs.pickUnpackPicksEachLanguage.test : [test.Result]   ~4j6ksb7jso
+
+Subs.pickUnpackPrefersNonHi.test : [test.Result]   ~a10fh67q25
+
+Subs.saveOneLanguage : FilePath -> Text -> [UnpackFile] -> Text ->{IO} SaveOutcome   ~lovtavp3e0
+
+Subs.searchByImdb : Text -> Text -> Text ->{IO} Either Text Subs.SearchResponse   ~p32o94qout
+
+Subs.searchByTmdb : Text -> Nat -> Text ->{IO} Either Text Subs.SearchResponse   ~tt4vcgr761
+
+Subs.searchRequestImdb : Text -> Text -> Text -> HttpRequest   ~ii9ualvai8
+
+Subs.searchRequestTmdb : Text -> Nat -> Text -> HttpRequest   ~mv7nt08im2
+
+Subs.tmdbSearchURI : Text -> Nat -> Text -> URI   ~tqh2l6n4ka
+
+Subs.unpackIsHi : UnpackFile -> Boolean   ~gqq6poorqg
+
+Subs.unpackIsSrt : UnpackFile -> Boolean   ~u2ggnkfm6u
+
+Subs.unpackLanguageMatches : Text -> UnpackFile -> Boolean   ~kht64ntlcq
+
+type[Data] Subtitle   ~kv617q3a2l
+  type Subtitle = { language : Text }
+  fields: language
+
+Subtitle.fromJson : '{unison_json_1_3_5.Decoder} Subtitle   ~ckle3gqf83
+
+Subtitle.toJson : Subtitle -> Json   ~gufd5v3ojr
+
+type[Data] Taxonomy   ~295vkrl2sg
+  type Taxonomy
+    = { genres : [Text],
+        tags : [Text],
+        countries : [Text],
+        studios : [Text],
+        directors : [Text],
+        credits : [Text] }
+  fields: countries, credits, directors, genres, studios, tags
+
+Taxonomy.fromJson : '{unison_json_1_3_5.Decoder} Taxonomy   ~k6hi0975r7
+
+Taxonomy.toJson : Taxonomy -> Json   ~009li9shfl
+
+type[Data] Title   ~b5jki7t9t0
+  type Title = { display : Text, original : Text, sort : Text }
+  fields: display, original, sort
+
+Title.fromJson : '{unison_json_1_3_5.Decoder} Title   ~27fgqa29nh
+
+Title.toJson : Title -> Json   ~rn0kgsrtp2
+
+type[Data] Tmdb.CastMember   ~hh867h6bid
+  type CastMember = Tmdb.CastMember.CastMember Nat Text Text Nat
+  fields: character, id, name, order
+
+Tmdb.CastMember.fromJson : '{unison_json_1_3_5.Decoder} CastMember   ~15vu3mq4sm
+
+type[Data] Tmdb.Details   ~klrjnoc264
+  type Details
+    = Tmdb.Details.Details
+        Nat
+        (Optional Text)
+        Nat
+        Text
+        Text
+        Text
+        Text
+        Text
+        Text
+        Float
+        Nat
+        [Text]
+        [Text]
+        [Text]
+        (Optional Text)
+        Text
+        [Text]
+        [Text]
+        [(Text, Text)]
+        [Text]
+  fields: cast, collection, directors, genres, imdbId, mpaa, originalLanguage, originalTitle, overview, productionCountries, productionStudios, releaseDate, runtime, tagline, tags, title, tmdbId, voteAverage, voteCount, writers
+
+Tmdb.Details.fromJson : '{unison_json_1_3_5.Decoder} Details   ~qih3uu2emg
+
+type[Data] Tmdb.ParsedRelease   ~a2vfh6fths
+  type ParsedRelease
+    = Tmdb.ParsedRelease.ParsedRelease Text Text Nat (Optional Nat)
+  fields: nfoTmdbId, rawName, title, year
+
+type[Data] Tmdb.Result   ~2fb7d981km
+  type Tmdb.Result
+    = { tmdbId : Nat,
+        title : Text,
+        originalTitle : Text,
+        originalLanguage : Text,
+        releaseDate : Text,
+        popularity : Float,
+        overview : Text }
+  fields: originalLanguage, originalTitle, overview, popularity, releaseDate, title, tmdbId
+
+Tmdb.Result.fromJson : '{unison_json_1_3_5.Decoder} Tmdb.Result   ~883o439010
+
+Tmdb.Result.toJson : Tmdb.Result -> Json   ~aipibm2cfd
+
+type[Data] Tmdb.SearchResponse   ~0ump08dge9
+  type Tmdb.SearchResponse = { results : [Tmdb.Result] }
+  fields: results
+
+Tmdb.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Tmdb.SearchResponse   ~tp11gu8p3i
+
+Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json   ~7o1b5l2f1u
+
+Tmdb.apiAuthority : Authority   ~2o6ah6vv9l
+
+Tmdb.cachedDetailsWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Either Text Details   ~1bj0u3d55c
+
+Tmdb.cachedSearchWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Text -> Nat ->{IO, Postgres} Either Text Tmdb.SearchResponse   ~11ha874jqh
+
+Tmdb.castMemberFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)   ~cfc8ctah5l
+
+Tmdb.cleanTitle : Text -> Text   ~d4lu68vie1
+
+Tmdb.countryReleaseFromJson : '{unison_json_1_3_5.Decoder} (Text, [Text])   ~28rrl16p57
+
+Tmdb.crewMemberFromJson : '{unison_json_1_3_5.Decoder} (Text, Text, Text)   ~031eq0herf
+
+Tmdb.detailsRaw : Text -> Nat ->{IO} Either Text Text   ~5j222ajl1o
+  > aka: Tmdb.fetchDetailsBody
+
+Tmdb.detailsRequest : Text -> Nat -> HttpRequest   ~2ttr9e1ti8
+
+Tmdb.detailsURI : Nat -> URI   ~a623ibtngq
+
+Tmdb.findEnclosedYear : Text -> Text -> Text -> Optional (Text, Nat)   ~mge3loaknp
+
+Tmdb.findEnclosedYearAny : Text -> Optional (Text, Nat)   ~evn3n1kjdf
+
+Tmdb.findYearIndex : [Text] -> Optional Nat   ~8a68bros8r
+
+Tmdb.isQualityToken : Text -> Boolean   ~6pmqavb7lt
+
+Tmdb.isoCountryFromJson : '{unison_json_1_3_5.Decoder} Text   ~d2m85br9in
+
+Tmdb.namedObjectFromJson : '{unison_json_1_3_5.Decoder} Text   ~6rgc8nviho
+
+Tmdb.normalize : Text -> Text   ~lbmb6ndkeh
+
+Tmdb.normalize.unicode.test : [test.Result]   ~nfcuiba1pk
+
+Tmdb.nth : Nat -> [a] -> Optional a   ~2eqogn2mbq
+  > aka: Versions.nth
+
+Tmdb.parseReleaseName : Text -> Optional ParsedRelease   ~uq1c90aibj
+
+Tmdb.pickBestWithRuntime : Optional Nat -> [(Tmdb.Result, Nat)] ->{MetaApi} Optional (Tmdb.Result, Nat)   ~0r4h01utbu
+
+Tmdb.qualityTokens : [Text]   ~u467jklmrk
+
+Tmdb.readDetailsBodyWith : PreparedQuery r a b -> Nat ->{Postgres} Optional b   ~msbpupoe22
+  > aka: Tv.Tmdb.readShowBodyWith
+
+Tmdb.releaseYear : Text -> Optional Nat   ~9hlu0drhel
+
+Tmdb.runtimeWinner : Nat -> [(Tmdb.Result, a)] ->{MetaApi} Optional (Tmdb.Result, a)   ~661grk0vnb
+
+Tmdb.scoreCandidate : ParsedRelease -> Tmdb.Result -> Nat   ~b04geofrov
+
+Tmdb.search : Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse   ~slrpdp1bv2
+
+Tmdb.searchRequest : Text -> Text -> Nat -> HttpRequest   ~25r3rrtqlj
+
+Tmdb.searchURI : Text -> Nat -> URI   ~9h3vdptkbv
+
+Tmdb.selectDetailsSql : postgres.Query a (Int ->{g, g1} a) Text   ~bnr35jaq82
+
+Tmdb.selectSearchSql : postgres.Query a (Text ->{g2, g3} Int ->{g, g1} a) Text   ~k39cna5j80
+
+Tmdb.singleCertFromJson : '{unison_json_1_3_5.Decoder} Text   ~aa5f08lh75
+
+Tmdb.tokenAsYear : Text -> Optional Nat   ~ehci4bllms
+
+Tmdb.tokenOverlapPercent : Text -> Text -> Nat   ~b623k5o3vf
+
+Tmdb.tokenOverlapPercent.test : [test.Result]   ~ha2do18krs
+
+Tmdb.tokenize : Text -> [Text]   ~45jdscreqj
+
+Tmdb.upsertDetailsSql : Command b (Int ->{g28, g29} Optional Text ->{g26, g27} Optional Text ->{g24, g25} Text ->{g22, g23} Text ->{g20, g21} Text ->{g18, g19} Optional Int ->{g16, g17} Optional Int ->{g14, g15} Text ->{g12, g13} Text ->{g10, g11} Text ->{g8, g9} Float ->{g6, g7} Int ->{g4, g5} Optional Text ->{g2, g3} Text ->{g, g1} b)   ~ujgui9lsq4
+
+Tmdb.upsertSearchSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~723q72c2jv
+
+Tmdb.writeDetailsBodyWith : PreparedCommand r a -> Nat -> Text ->{Postgres} ()   ~afa0clihrv
+
+Tv.Db.alterFilesDdl : [Text]   ~53t9d43dfr
+
+Tv.Db.cacheDdl : [Text]   ~h18dbsemat
+
+Tv.Db.createSchema : Config ->{IO, Exception} ()   ~oul9chlfhl
+
+Tv.Db.dropDdl : [Text]   ~fce2ntqmp3
+
+Tv.Db.episodeAssociationsDdl : Text   ~s8bfm9gqo0
+
+Tv.Db.episodesDdl : Text   ~rfa2f4l951
+
+Tv.Db.indexDdl : [Text]   ~8hubae7ilm
+
+Tv.Db.resetTvSchema : Config ->{IO, Exception} ()   ~648fv97rr8
+
+Tv.Db.showsDdl : Text   ~j695u72iif
+
+Tv.Move.collectVideoFiles : FilePath ->{IO, Exception} [Text]   ~tsvacil15m
+
+Tv.Move.mergeTree : Text -> Text ->{IO, Exception} ()   ~kaf747vtiq
+
+Tv.Move.moveShow : Boolean -> Text -> FilePath ->{IO, Exception, TvMoveCatalog} ()   ~q5jhk1n26c
+
+Tv.Move.rebasePath : Text -> Text -> Text -> Text   ~j319bmvnmj
+
+Tv.Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()   ~ita6h9bio2
+
+Tv.Move.transferShow : Boolean -> Boolean -> Text -> Text -> Text ->{IO, Exception} Boolean   ~kf8ii23aoc
+
+Tv.Move.updateEpisode : Text -> Text -> Text -> Boolean -> Optional FileIdentity ->{IO, Exception, TvMoveCatalog} ()   ~mq3mqrpr2f
+
+Tv.Move.updatePathSql : Command a (Text -> Text -> Text -> a)   ~73bh4v7720
+
+Tv.Move.verifyEpisode : Text ->{IO, Exception, TvMoveCatalog} (Text, Boolean, Optional FileIdentity)   ~bda78kfcoq
+
+Tv.Nfo.episodeBlock : Text -> Nat -> Nat -> Text -> Optional EpisodeDetails -> Boolean -> Text -> ProbeResult -> [Text]   ~0rhqhoqbej
+
+Tv.Nfo.extractImdbId : Text -> Optional Text   ~n338tado5g
+
+Tv.Nfo.extractImdbId.test : [test.Result]   ~d50kun2uqc
+
+Tv.Nfo.generateShowNfo : ShowDetails -> Text   ~9lgotj9gl8
+
+Tv.Nfo.minimalShowNfo : Nat -> Text -> Text   ~20iictflqi
+
+Tv.Nfo.parseShowId : Soup ->{Throw XMLError} Optional Nat   ~ubtghfaarg
+
+Tv.Nfo.readShowTmdbId : FilePath ->{IO, Exception} Optional Nat   ~5mjcp3rg61
+
+Tv.Nfo.scanFolderForImdb : FilePath ->{IO, Exception} Optional Text   ~fbjoenhts4
+
+type[Data] Tv.Parse.EpisodeRef   ~fsiko5mgqe
+  type EpisodeRef = Tv.Parse.EpisodeRef.EpisodeRef Nat [Nat]
+  fields: episodes, season
+
+type[Data] Tv.Parse.ParsedEpisode   ~tntl22tb0o
+  type ParsedEpisode
+    = Tv.Parse.ParsedEpisode.ParsedEpisode Text (Optional Text) EpisodeRef
+  fields: rawName, ref, titlePrefix
+
+Tv.Parse.bareEpisode : Optional Nat -> Text -> Optional Nat   ~gqbc7e3vgf
+
+Tv.Parse.braceTagValue : Text -> Text -> Optional Text   ~l5d5h7upmn
+
+Tv.Parse.cleanShowQuery : Text -> (Text, Optional Nat)   ~4okbma5a0k
+
+Tv.Parse.cleanShowQuery.test : [test.Result]   ~g559ja9h19
+
+Tv.Parse.concatEpisode : Nat -> Text -> Optional Nat   ~nscfb1cnna
+
+Tv.Parse.cutTitle : Text -> Text   ~17l6n2jm31
+
+Tv.Parse.digitsOnly : Text -> Boolean   ~6ulh2neikb
+
+Tv.Parse.dropTrailingNoise : [Text] -> [Text]   ~k2f419ghvm
+
+Tv.Parse.epSegment : Text -> Optional [Nat]   ~m4nkmgblho
+
+Tv.Parse.episodeAfterMarker : [Text] -> Optional Nat   ~j6m9j22c94
+
+Tv.Parse.folderImdbTag : Text -> Optional Text   ~ssh4e6plc0
+
+Tv.Parse.folderTag.test : [test.Result]   ~68at0lac5p
+
+Tv.Parse.folderTmdbTag : Text -> Optional Nat   ~ju8dpuj1kq
+
+Tv.Parse.foldersOfPath : Text -> [Text]   ~bmv4n2ll5g
+
+Tv.Parse.imdbTagFromFolders : [Text] -> Optional Text   ~iaa09r02u9
+
+Tv.Parse.isCutToken : Text -> Boolean   ~2e792sfgss
+
+Tv.Parse.isSeasonOnly : Text -> Boolean   ~22g6493rfs
+
+Tv.Parse.natSegment : Text -> Optional Nat   ~2d00mg37hb
+
+Tv.Parse.parseEpisodeName : Text -> Optional ParsedEpisode   ~a5f6soo4lc
+
+Tv.Parse.parseEpisodeName.test : [test.Result]   ~cc79f5kkmn
+
+Tv.Parse.parseShowFolder : Text -> Optional (Text, Optional Nat)   ~h7a918536d
+
+Tv.Parse.parseShowFolder.test : [test.Result]   ~qm10uirno5
+
+Tv.Parse.plainEpisode : Text -> Optional Nat   ~k1pir1otn3
+
+Tv.Parse.refFromFolders : [Text] -> Text -> Optional EpisodeRef   ~0uruqfbfna
+
+Tv.Parse.refFromFolders.test : [test.Result]   ~vpf23tlj0r
+
+Tv.Parse.refFromToken : Text -> Optional EpisodeRef   ~8jlflhi9i6
+
+Tv.Parse.refFromToken.test : [test.Result]   ~r5mq4mn4a3
+
+Tv.Parse.sTokenSeason : Text -> Optional Nat   ~e8qqn2fmb7
+
+Tv.Parse.seasonFromFolders : [Text] -> Optional Nat   ~1di8p5vusv
+
+Tv.Parse.seasonNat : Text -> Optional Nat   ~uqks36lggm
+
+Tv.Parse.seasonOfFolder : Text -> Optional Nat   ~790m828rme
+
+Tv.Parse.titleCutToken : Text -> Boolean   ~lvvi4bve6m
+
+Tv.Parse.titleTokens : [Text] -> [Text]   ~922fu15ofq
+
+Tv.Parse.tmdbTagFromFolders : [Text] -> Optional Nat   ~1curiq0mi1
+
+type[Data] Tv.Rename.EpisodeJob   ~71mdt3ugum
+  type EpisodeJob
+    = Tv.Rename.EpisodeJob.EpisodeJob
+        Int Text Text Text Nat Text (Optional Nat) Nat [(Nat, Text)]
+  fields: crc32, episodes, fileId, firstAirYear, originalPath, probeJson, season, showId, showName
+
+type[Data] Tv.Rename.TvRenameOutcome   ~a99jjq5e2q
+  type TvRenameOutcome
+    = Tv.Rename.TvRenameOutcome.EpNoVideo Text
+    | Tv.Rename.TvRenameOutcome.EpRenamed Text Text
+    | Tv.Rename.TvRenameOutcome.EpDuplicateRemoved Text Text
+    | Tv.Rename.TvRenameOutcome.EpConflict Text Text
+    | Tv.Rename.TvRenameOutcome.EpOutsideRoot Text Text
+    | Tv.Rename.TvRenameOutcome.EpBadProbe Text Text
+    | Tv.Rename.TvRenameOutcome.EpError Text Text
+    | Tv.Rename.TvRenameOutcome.EpWouldRename Text Text
+    | Tv.Rename.TvRenameOutcome.EpWouldRemoveDuplicate Text Text
+
+Tv.Rename.applyTv : Config -> Boolean -> '{IO, Exception} ()   ~fekf46p83g
+
+Tv.Rename.episodeNfoFor : Optional Season -> EpisodeJob -> ProbeResult -> Text   ~vq437miesd
+
+Tv.Rename.executeEpisode : Boolean -> PreparedQuery r1 a1 Text -> PreparedQuery r a Text -> Text -> Text -> [FormatPart] -> [FormatPart] -> [FormatPart] -> EpisodeJob ->{IO, Exception, Postgres, RenameCatalog} TvRenameOutcome   ~uvj3i877u3
+
+Tv.Rename.groupJobs : [( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int), Text)] -> [EpisodeJob]   ~up4c3jv3gj
+
+Tv.Rename.printTvOutcome : TvRenameOutcome ->{IO, Exception} ()   ~62c1jppcgv
+
+Tv.Rename.renderEpisode : [FormatPart] -> EpisodeJob -> ProbeResult -> Text   ~etsm060nrl
+
+Tv.Rename.resolveEpisodeToken : EpisodeJob -> ProbeResult -> Text -> Text   ~d2v9rgelh5
+
+Tv.Rename.selectEpisodeRenamableSql : postgres.Query r r ( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int), Text)   ~glpclj4e32
+
+Tv.Rename.splitTvFormat : Text -> Optional ([FormatPart], [FormatPart], [FormatPart])   ~84himriend
+
+type[Data] Tv.Resolve.FileRow   ~23cc7e8c8v
+  type Tv.Resolve.FileRow
+    = { fileId : Int,
+        originalName : Text,
+        hintTitle : Optional Text,
+        hintYear : Optional Nat,
+        hintShowTmdbId : Optional Nat,
+        hintImdbId : Optional Text,
+        originalPath : Text }
+  fields: fileId, hintImdbId, hintShowTmdbId, hintTitle, hintYear, originalName, originalPath
+
+type[Data] Tv.Resolve.Outcome   ~5hs65i0qb7
+  type Tv.Resolve.Outcome
+    = NoEpisodeRef Int Text
+    | NoShowMatch Int Text
+    | NoShowHint Int
+    | TvDetailsFailed Int Nat Text
+    | TvEpisodeMissing Int Nat Nat [Nat]
+    | TvResolved Int Nat Nat [Nat] Nat Text
+    | TvSeasonFailed Int Nat Nat Text
+
+Tv.Resolve.batchInteract : '{g, TvInteract} a ->{g} a   ~38a9grmlah
+
+Tv.Resolve.deleteFileAssocSql : Command a (Int ->{g, g1} a)   ~dauvo68qnc
+
+Tv.Resolve.identify : Config ->{IO, Exception} ()   ~h5o1cfq65l
+
+Tv.Resolve.printOutcome : Tv.Resolve.Outcome ->{IO, Exception} ()   ~m3d11q78il
+
+Tv.Resolve.resolveOne : Boolean -> Text -> Tv.Resolve.FileRow ->{TvMetaApi, TvCatalog} Tv.Resolve.Outcome   ~gn6pkv77dc
+
+Tv.Resolve.resolveOne.dryRunNoWrite.test : [test.Result]   ~mp88nkja3b
+
+Tv.Resolve.resolveOne.folderFallback.test : [test.Result]   ~478tlpj4cn
+
+Tv.Resolve.resolveOne.folderTag.test : [test.Result]   ~1s0svksehn
+
+Tv.Resolve.resolveOne.missingEp.test : [test.Result]   ~4naq81mpe3
+
+Tv.Resolve.resolveOne.nfoId.test : [test.Result]   ~su3iidfheu
+
+Tv.Resolve.resolveOne.noRef.test : [test.Result]   ~1ufab1gpc4
+
+Tv.Resolve.resolveShowPick : Text -> [Text] -> Optional Text -> Tv.Resolve.FileRow -> Int ->{TvMetaApi, TvCatalog} Either Tv.Resolve.Outcome (Nat, Nat, Text)   ~4n4964gmoq
+
+Tv.Resolve.rowToFile : ( (((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text), Text) -> Tv.Resolve.FileRow   ~4cvjbimd8j
+
+Tv.Resolve.run : Config ->{IO, Exception} ()   ~j5ihg1u5hf
+
+Tv.Resolve.runWith : Boolean -> Config ->{IO, Exception} ()   ~jlo7lkiur5
+
+Tv.Resolve.selectUnresolvedTvSql : postgres.Query r r ( ( ((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text), Text)   ~123mlqdbaa
+
+Tv.Resolve.upsertEpAssocSql : Command b (Int -> Int -> Int -> Int -> Int -> Text -> b)   ~gutlihlsdq
+
+Tv.Resolve.writeMatch : PreparedCommand r1 a1 -> PreparedCommand r a -> Int -> Nat -> Nat -> [Nat] -> Nat -> Text ->{Postgres} ()   ~rg9hlag11l
+
+Tv.Stage.collectVideos : FilePath -> Nat ->{IO, Exception} [Text]   ~bal6v07sgc
+
+Tv.Stage.episodeHints : Text -> Text ->{IO, Exception} ( Optional Text, Optional Nat, Optional Nat, Optional Text, Optional Nat, Optional Nat)   ~9hr9rn5ofj
+
+Tv.Stage.isExtrasDir : Text -> Boolean   ~ifjkuvd61j
+
+Tv.Stage.isSampleName : Text -> Boolean   ~9br7ifmq5m
+
+Tv.Stage.maxDepth : Nat   ~vcfbbslncd
+
+Tv.Stage.relFolders : Text -> Text -> [Text]   ~cd2pbmr8me
+
+Tv.Stage.relFolders.test : [test.Result]   ~hmo13j8hms
+
+Tv.Stage.runChunk : Text -> Text -> PreparedCommand r1 a1 -> PreparedCommand r a -> [((), Text)] ->{IO, Exception, Postgres} ()   ~op3r6u5f9c
+
+Tv.Stage.runProbeAtTv : Config -> Text -> Text ->{IO, Exception} ()   ~o5g781028k
+
+Tv.Stage.runProbeTv : Config ->{IO, Exception} ()   ~od2a2rch1u
+
+Tv.Stage.upsertFileSql : Command b (Text -> Int -> Text -> Text -> Float -> Text -> Int -> Int -> Int -> Text -> Optional Text -> Optional Int -> Optional Int -> Optional Text -> Optional Int -> Optional Int -> Text -> Text -> b)   ~343oi66dsv
+
+Tv.Stage.upsertFileWith : PreparedCommand r a -> Text -> Text -> ( Optional Text, Optional Nat, Optional Nat, Optional Text, Optional Nat, Optional Nat) -> Text -> ProbeResult ->{Postgres} ()   ~698lc2bqfh
+
+type[Data] Tv.Tmdb.EpisodeDetails   ~9rvs8a580m
+  type EpisodeDetails
+    = Tv.Tmdb.EpisodeDetails.EpisodeDetails
+        Nat Nat Nat Text Text (Optional Nat) Text Float Nat
+  fields: airDate, episode, episodeId, overview, runtimeMin, season, title, voteAverage, voteCount
+
+Tv.Tmdb.EpisodeDetails.fromJson : '{unison_json_1_3_5.Decoder} EpisodeDetails   ~u6h7dajk77
+
+type[Data] Tv.Tmdb.SearchResponse   ~tboqi8in2a
+  type Tv.Tmdb.SearchResponse = { results : [ShowResult] }
+  fields: results
+
+Tv.Tmdb.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Tv.Tmdb.SearchResponse   ~m55v315ae3
+
+Tv.Tmdb.SearchResponse.toJson : Tv.Tmdb.SearchResponse -> Json   ~a7b6ru0qe4
+
+type[Data] Tv.Tmdb.Season   ~ntsvup0ia0
+  type Season = Tv.Tmdb.Season.Season Nat [EpisodeDetails]
+  fields: episodes, season
+
+Tv.Tmdb.Season.fromJson : '{unison_json_1_3_5.Decoder} Season   ~hjlbvjqv6d
+
+Tv.Tmdb.Season.parse.test : [test.Result]   ~lm94uco474
+
+type[Data] Tv.Tmdb.ShowDetails   ~uo46d3vshf
+  type ShowDetails
+    = Tv.Tmdb.ShowDetails.ShowDetails
+        Nat
+        Text
+        Text
+        Text
+        Text
+        Text
+        Text
+        Nat
+        [Text]
+        Text
+        (Optional Text)
+        (Optional Nat)
+        Float
+        Nat
+        [Text]
+        [CastMember]
+  fields: cast, firstAirDate, genres, imdbId, name, networks, numberOfSeasons, originalLanguage, originalName, overview, rating, status, tmdbId, tvdbId, voteAverage, voteCount
+
+Tv.Tmdb.ShowDetails.fromJson : '{unison_json_1_3_5.Decoder} ShowDetails   ~d94up6ofgu
+
+type[Data] Tv.Tmdb.ShowResult   ~0qn37cv1hr
+  type ShowResult
+    = Tv.Tmdb.ShowResult.ShowResult Nat Text Text Text Text Float Text
+  fields: firstAirDate, name, originalLanguage, originalName, overview, popularity, tmdbId
+
+Tv.Tmdb.ShowResult.fromJson : '{unison_json_1_3_5.Decoder} ShowResult   ~9cfpaindch
+
+Tv.Tmdb.ShowResult.toJson : ShowResult -> Json   ~a18skjmp5e
+
+Tv.Tmdb.authedGet : Text -> URI -> HttpRequest   ~25pum02g7b
+
+Tv.Tmdb.cachedSearchWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Text -> Optional Nat ->{IO, Postgres} Either Text Tv.Tmdb.SearchResponse   ~5lnriagnmr
+
+Tv.Tmdb.cachedSeasonWith : PreparedQuery r2 a2 Text -> PreparedCommand r1 a1 -> PreparedCommand r a -> Text -> Nat -> Nat ->{IO, Postgres} Either Text Season   ~h5pnq6bjke
+
+Tv.Tmdb.cachedShowDetailsWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Either Text ShowDetails   ~7vbgk9raie
+
+Tv.Tmdb.contentRatingFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)   ~q73ugi0b7a
+
+Tv.Tmdb.detailsRaw : Text -> Nat ->{IO} Either Text Text   ~8e8e9v4hrq
+
+Tv.Tmdb.detailsURI : Nat -> URI   ~su4qg63t1c
+
+Tv.Tmdb.episodeFor : Season -> Nat -> Optional EpisodeDetails   ~iuf2sj42ll
+
+Tv.Tmdb.exampleSeasonJson : Text   ~t1jqpg0mb1
+
+Tv.Tmdb.findByImdbURI : Text -> URI   ~2gj067r373
+
+Tv.Tmdb.findShowByImdb : Text -> Text ->{IO} Either Text Nat   ~pm4igdub6f
+
+Tv.Tmdb.findShowResultFromJson : '{unison_json_1_3_5.Decoder} Either Text Nat   ~fgch77tahj
+
+Tv.Tmdb.pickBestShow : [(ShowResult, Nat)] -> Optional (ShowResult, Nat)   ~27amro5385
+
+Tv.Tmdb.readSeasonBodyWith : PreparedQuery r a b -> Nat -> Nat ->{Postgres} Optional b   ~l75790eikc
+
+Tv.Tmdb.scoreShow : Text -> Optional Nat -> Optional Nat -> ShowResult -> Nat   ~1m439v9a16
+
+Tv.Tmdb.search : Text -> Text -> Optional Nat ->{IO} Either Text Tv.Tmdb.SearchResponse   ~emj6q3abms
+
+Tv.Tmdb.searchURI : Text -> Optional Nat -> URI   ~04vhuiptu5
+
+Tv.Tmdb.seasonRaw : Text -> Nat -> Nat ->{IO} Either Text Text   ~9fnqbd3g18
+
+Tv.Tmdb.seasonURI : Nat -> Nat -> URI   ~bq3bsct1u6
+
+Tv.Tmdb.selectSearchSql : postgres.Query a (Text ->{g2, g3} Int ->{g, g1} a) Text   ~q7ohqkqbib
+
+Tv.Tmdb.selectSeasonSql : postgres.Query a (Int ->{g2, g3} Int ->{g, g1} a) Text   ~6a2h1uu6ru
+
+Tv.Tmdb.selectShowByImdbSql : postgres.Query a (Text -> a) Int   ~7p1jk8g1vo
+
+Tv.Tmdb.selectShowSql : postgres.Query a (Int ->{g, g1} a) Text   ~n7ldlh3a6q
+
+Tv.Tmdb.upsertEpisodeSql : Command b (Int ->{g10, g11} Int ->{g8, g9} Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Optional Int ->{g, g1} b)   ~g2blfrifbj
+
+Tv.Tmdb.upsertSearchSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~ehms6rth29
+
+Tv.Tmdb.upsertSeasonSql : Command b (Int ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~61mkvasqbh
+
+Tv.Tmdb.upsertShowSql : Command b (Int ->{g18, g19} Optional Text ->{g16, g17} Optional Text ->{g14, g15} Text ->{g12, g13} Text ->{g10, g11} Text ->{g8, g9} Optional Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Text ->{g, g1} b)   ~cpae8lj8lm
+
+Tv.Tmdb.writeEpisodesWith : PreparedCommand r a -> Nat -> Season ->{Postgres} ()   ~qei8bda3f9
+
+Tv.Tmdb.writeShowBodyWith : PreparedCommand r a -> Nat -> Text ->{Postgres} ()   ~gtgmj2k1lo
+
+Tv.Tmdb.yearKey : Optional Nat -> Int   ~u6h6tq7c7h
+
+Tv.initDb : '{IO, Exception} ()   ~mm2cfusop2
+
+type[Ability] TvInteract   ~rbekscgqe0
+  ability TvInteract where
+    chooseShow : Int -> [(Nat, Text, Optional Nat)] ->{TvInteract} Optional Nat
+
+type[Data] Versions.Assigned   ~ettp1tj847
+  type Assigned = Versions.Assigned.Assigned MediaFacts Nat Text Boolean
+  fields: facts, isDefault, score, versionLabel
+
+type[Data] Versions.Edition   ~bk07gt5f32
+  type Edition = Versions.Edition.Edition Text Text Nat Boolean [Assigned]
+  fields: editionKey, isStandard, label, members, runtimeSec
+
+type[Data] Versions.LibRow   ~jje9i3tt9m
+  type LibRow = Versions.LibRow.LibRow Text Text Nat Text Text
+  fields: folderChecksum, probeJson, rawName, sizeBytes, tmdbId
+
+type[Data] Versions.MediaFacts   ~avf98dodq7
+  type MediaFacts
+    = Versions.MediaFacts.MediaFacts
+        Text Text Nat Float Float Nat Nat Nat Text (Optional Nat) Text Nat Text
+  fields: audioChannels, audioCodec, bitDepth, crc32, durationSec, folderChecksum, fps, height, rawName, sizeBytes, videoBitRate, videoCodec, width
+
+Versions.analyze : Optional Nat -> [MediaFacts] -> [Edition]   ~ib5v1e3ntd
+
+Versions.assignMember : Optional Text -> MediaFacts -> Assigned   ~csllsdbd2b
+
+Versions.bestByScore : [MediaFacts] -> Optional MediaFacts   ~9jjl37hrue
+
+Versions.canonicalMinFor : PreparedQuery r a Int -> Text ->{Postgres} Optional Nat   ~u2iuqp3fpg
+  > aka: Tv.Tmdb.lookupShowByImdb
+
+Versions.canonicalMinSql : postgres.Query a (Text ->{g, g1} a) Int   ~oijhf5n3c8
+
+Versions.clearAllSql : Command a a   ~cl2r10s2pa
+
+Versions.clusterByCut : [MediaFacts] -> [[MediaFacts]]   ~jmj7icgijv
+
+Versions.clusterRuntimeSec : [MediaFacts] -> Float   ~3sou1da85t
+
+Versions.clusterSeparatesRealCut.test : [test.Result]   ~914i8cicsf
+
+Versions.cutTokens : [(Text, Text)]   ~id8hfu4kgu
+
+Versions.defaultIsBestOfStandard.test : [test.Result]   ~grrso3mck7
+
+Versions.editionLabel : [MediaFacts] -> Boolean -> Float -> Float -> Text   ~aj8l5npadr
+
+Versions.editionTokenLabel : [MediaFacts] -> Optional Text   ~4k2t1is5ej
+
+Versions.factsForRow : LibRow -> Optional (Text, MediaFacts)   ~3vuqi4h5j9
+
+Versions.factsFromProbe : Text -> Text -> ProbeResult -> MediaFacts   ~hisjv222sf
+
+Versions.factsFromProbe.test : [test.Result]   ~msho7v0u9m
+
+Versions.fallbackStandardIndex : [[MediaFacts]] -> Optional Nat   ~rjg2e81bm0
+
+Versions.groupByTmdb : [(Text, MediaFacts)] -> [(Text, [MediaFacts])]   ~9bjjn4ek91
+
+Versions.groupByTmdb.test : [test.Result]   ~ff2hq16f2h
+
+Versions.insertEditionSql : postgres.Query a (Text ->{g8, g9} Text ->{g6, g7} Text ->{g4, g5} Int ->{g2, g3} Boolean ->{g, g1} a) Int   ~8964k2olr6
+
+Versions.insertVersionSql : Command b (Int ->{g10, g11} Text ->{g8, g9} Text ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Boolean ->{g, g1} b)   ~51oudhnkt8
+
+Versions.normalizedSeconds : MediaFacts -> Float   ~om86u3vvcg
+
+Versions.palSameCut.test : [test.Result]   ~e9k8qluqr4
+
+Versions.parseFrameRate : Text -> Float   ~lgjp87s7em
+
+Versions.parseFrameRate.test : [test.Result]   ~nopag7qqks
+
+Versions.pickStandardIndex : Optional Nat -> [Float] -> Optional Nat   ~5iob0sdf2b
+
+Versions.qualityOrdering.test : [test.Result]   ~a0tmd4gec1
+
+Versions.qualityScore : MediaFacts -> Nat   ~q9810kucc6
+
+Versions.referenceFps : Float   ~tkl2463kgb
+
+Versions.relativeClose : Float -> Float -> Boolean   ~si0mtkevks
+
+Versions.resolutionRank : Nat -> Nat -> Nat   ~u9t6cahj3f
+
+Versions.rowToLib : ((((Text, Text), Int), Text), Text) -> LibRow   ~frl8hq4rq5
+
+Versions.run : Config ->{IO, Exception} ()   ~ct8bgp7aq5
+
+Versions.sameCutTolerance : Float   ~4c1sfal6q3
+
+Versions.selectLibFilesSql : postgres.Query r r ((((Text, Text), Int), Text), Text)   ~92nshk5poc
+
+Versions.standardPicksClosest.test : [test.Result]   ~hj6bn2r8ep
+
+Versions.testFacts : Text -> Float -> Float -> Nat -> Nat -> Nat -> Text -> Text -> MediaFacts   ~ljuks966oa
+
+Versions.toMinutes : Float -> Nat   ~lbddoku2tg
+
+Versions.upsertGroup : Text -> MediaFacts -> [(Text, [MediaFacts])] -> [(Text, [MediaFacts])]   ~thv0b9pavr
+
+Versions.versionLabel : MediaFacts -> Text   ~ght5s1802m
+
+Versions.videoCodecRank : Text -> Nat   ~5htd27jo8o
+
+Versions.writeEdition : PreparedQuery rE aE Int -> PreparedCommand rV aV -> Text -> Edition ->{Postgres} ()   ~nkher4dcuj
+
+type[Data] Video   ~t3bumop2up
+  type Video = { codec : Text, aspect : Float, width : Nat, height : Nat }
+  fields: aspect, codec, height, width
+
+Video.fromJson : '{unison_json_1_3_5.Decoder} Video   ~g04phn78n6
+
+Video.toJson : Video -> Json   ~1nev5g9g4k
+
+type[Ability] api.MetaApi   ~m5amhkki2r
+  ability MetaApi where
+    api.MetaApi.movieDetails : Nat ->{MetaApi} Either Text Details
+    api.MetaApi.searchMovies :
+      Text -> Nat ->{MetaApi} Either Text Tmdb.SearchResponse
+
+type[Ability] api.TvMetaApi   ~kml3no7o2q
+  ability TvMetaApi where
+    api.TvMetaApi.findShowByImdbApi : Text ->{TvMetaApi} Either Text Nat
+    api.TvMetaApi.searchShows :
+      Text -> Optional Nat ->{TvMetaApi} Either Text Tv.Tmdb.SearchResponse
+    api.TvMetaApi.seasonFor : Nat -> Nat ->{TvMetaApi} Either Text Season
+    api.TvMetaApi.showDetails : Nat ->{TvMetaApi} Either Text ShowDetails
+
+classifyPiece : Text -> FolderMeta -> FolderMeta   ~l2m092n0c5
+
+cli : '{IO, Exception} ()   ~bus619da48
+
+type[Ability] db.MovieCatalog   ~bulcmevs05
+  ability MovieCatalog where
+    db.MovieCatalog.identityFor : Text ->{MovieCatalog} Optional FileIdentity
+    db.MovieCatalog.recordAssociation :
+      Int -> Nat -> Int -> Text ->{MovieCatalog} ()
+    db.MovieCatalog.recordBufferFile :
+      Text -> Text -> ProbeResult ->{MovieCatalog} ()
+    db.MovieCatalog.saveLibraryMovie :
+      Optional Text -> Optional Nat -> Optional Nat -> Movie ->{MovieCatalog} ()
+    db.MovieCatalog.updateLibraryPath :
+      Text -> Text -> Text -> Int ->{MovieCatalog} ()
+
+type[Ability] db.MovieMoveCatalog   ~1nmsgovgsl
+  ability MovieMoveCatalog where
+    db.MovieMoveCatalog.identityForFile :
+      Text ->{MovieMoveCatalog} Optional FileIdentity
+    db.MovieMoveCatalog.updateFilePathById :
+      Text -> Text -> Text -> Int ->{MovieMoveCatalog} ()
+    db.MovieMoveCatalog.updateFilePathByName :
+      Text -> Text -> Text ->{MovieMoveCatalog} ()
+
+type[Ability] db.RenameCatalog   ~tpqrt6jvql
+  ability RenameCatalog where
+    db.RenameCatalog.deleteProbeCache : Text ->{RenameCatalog} ()
+    db.RenameCatalog.priorTargetForCrc : Text ->{RenameCatalog} Optional Text
+    db.RenameCatalog.promoteToBuffer :
+      Text -> Text -> Text -> Text -> Text -> Int ->{RenameCatalog} ()
+    db.RenameCatalog.upsertProbeCache :
+      Text -> Int -> ProbeResult ->{RenameCatalog} ()
+
+type[Ability] db.ResolveCatalog   ~vf1ibjb2gh
+  ability ResolveCatalog where
+    db.ResolveCatalog.recordMatch :
+      Int -> Nat -> Nat -> Text ->{ResolveCatalog} ()
+
+type[Ability] db.TvCatalog   ~uqp0aevdm5
+  ability TvCatalog where
+    db.TvCatalog.lookupShowByImdbDb : Text ->{TvCatalog} Optional Nat
+    db.TvCatalog.recordEpisodeMatch :
+      Int -> Nat -> Nat -> [Nat] -> Nat -> Text ->{TvCatalog} ()
+
+type[Ability] db.TvMoveCatalog   ~db5rc2oqja
+  ability TvMoveCatalog where
+    db.TvMoveCatalog.identityForEpisode :
+      Text ->{TvMoveCatalog} Optional FileIdentity
+    db.TvMoveCatalog.updateEpisodePathById :
+      Text -> Text -> Text -> Int ->{TvMoveCatalog} ()
+    db.TvMoveCatalog.updateEpisodePathByName :
+      Text -> Text -> Text ->{TvMoveCatalog} ()
+
+emptyFolderMeta : FolderMeta   ~cd49r5a0t5
+
+exampleMovie : Movie   ~ugs7fv28ob
+
+examples.LICENSE : License   ~jhjbubv2fh
+
+examples.LICENSE.doc : Doc   ~62nhaf81rg
+
+examples.authDemo.appRoutes : '{Route, Auth anonymous.UserId} ()   ~jfui9bqndl
+
+examples.authDemo.deploy : '{IO, Exception} ()   ~nmn2v9cvl4
+
+examples.authDemo.server : '{IO, Exception} (HttpRequest ->{Exception, Http, Random, Log} HttpResponse)   ~3f7s0vuu9o
+
+type[Data] examples.chat.Message   ~ve02asrbj8
+  type chat.Message = examples.chat.Message.Message Sender Text
+  fields: message, sender
+
+examples.chat.Message.toText : chat.Message -> Text   ~g0545djk9f
+
+type[Data] examples.chat.Room   ~p1pcrg52n5
+  type Room = examples.chat.Room.Room Text
+
+type[Data] examples.chat.RoomState   ~1reqn60fli
+  type RoomState = examples.chat.RoomState.RoomState (Set Sender) [chat.Message]
+  fields: messages, senders
+
+examples.chat.RoomState.empty : RoomState   ~3bstqu8vmq
+
+examples.chat.RoomState.newUser : Cell RoomState -> Sender ->{Remote} ()   ~mv8l813rru
+
+examples.chat.RoomState.newUser.doc : Doc   ~5mbb7td4v7
+
+examples.chat.RoomState.saveMessage : Cell RoomState -> chat.Message ->{Remote} ()   ~h3cr1rr6vi
+
+examples.chat.RoomState.saveMessage.doc : Doc   ~c32inoner3
+
+examples.chat.RoomState.sendBacklog : Cell RoomState -> Sender ->{Remote} ()   ~umtv3ospa6
+
+examples.chat.RoomState.sendBacklog.doc : Doc   ~g167e4on3s
+
+examples.chat.RoomState.sendMessage : Cell RoomState -> Text -> Sender ->{Remote} ()   ~liajs9i4d3
+
+examples.chat.RoomState.sendMessage.doc : Doc   ~2j3qm5dslh
+
+examples.chat.RoomState.userLeft : Cell RoomState -> Sender ->{Remote} ()   ~liajs9i4d3
+
+examples.chat.RoomState.userLeft.doc : Doc   ~ist7196es2
+
+type[Data] examples.chat.Sender   ~bnodnd0ete
+  type Sender
+    = examples.chat.Sender.Sender
+        Sender.Id Text unison_cloud_27_2_0.websockets.WebSocket
+  fields: id, name, socket
+
+type[Data] examples.chat.Sender.Id   ~7dk46bo5tf
+  type Sender.Id = examples.chat.Sender.Id.Id Bytes
+
+examples.chat.Sender.Id.random : '{Random} Sender.Id   ~6vou2h8dtr
+
+examples.chat.Sender.Id.toText : Sender.Id -> Text   ~kecvooq07o
+
+examples.chat.Sender.toText : Sender -> Text   ~rh60h4hgap
+
+examples.chat.deploy : '{IO, Exception} URI   ~t88k1aksi2
+
+examples.chat.index : HttpResponse   ~enpq4k4lba
+
+examples.chat.index.txt : Text   ~vuigdl09bj
+
+examples.chat.js : HttpResponse   ~3blg392f4m
+
+examples.chat.js.txt : Text   ~dr4tenn10q
+
+examples.chat.style : HttpResponse   ~e2isnfaocv
+
+examples.chat.style.txt : Text   ~1e5komi6o6
+
+examples.counter.deploy : '{IO, Exception} URI   ~2a9t870di6
+
+examples.counter.deploy.doc : Doc   ~e1nvhbg83d
+
+examples.counter.logic : Cell Nat -> HttpRequest ->{Exception, Remote, Log} HttpResponse   ~j4tphd4g1q
+
+examples.counter.logic.doc : Doc   ~oemo0ukge0
+
+examples.helloWorld.deploy : '{IO, Exception} ()   ~195hd4n3uh
+
+examples.helloWorld.logic : HttpRequest ->{Exception, Log} HttpResponse   ~069ghiokcr
+
+type[Data] examples.jokeDaemon.Joke   ~dvdqnbltsk
+  type Joke
+    = examples.jokeDaemon.Joke.Single Text
+    | examples.jokeDaemon.Joke.TwoPart Text Text
+
+examples.jokeDaemon.Joke.fromJson : '{Exception, unison_json_1_3_5.Decoder} Joke   ~kof0opsef4
+
+examples.jokeDaemon.Joke.toText : Joke -> Text   ~c6k8usa1mg
+
+examples.jokeDaemon.daemon : Cell Text -> '{Exception, Http, Remote} r   ~ncsfp73bg7
+
+examples.jokeDaemon.daemon.doc : Doc   ~45rmi092ep
+
+examples.jokeDaemon.deploy : '{IO, Exception} URI   ~rvvfogqb10
+
+examples.jokeDaemon.deploy.doc : Doc   ~ebcfkebqun
+
+examples.jokeDaemon.fetchJoke : '{Exception, Http} Text   ~qtfuti5udj
+
+examples.jokeDaemon.fetchJoke.doc : Doc   ~ndpf118jqp
+
+examples.jokeDaemon.jokeServer : Cell Text -> HttpRequest ->{Remote} HttpResponse   ~375mfn0232
+
+examples.jokeDaemon.jokeServer.doc : Doc   ~gulllv3hos
+
+examples.messages.serviceUrls : ServiceHash a b -> Text   ~6v44kdplcr
+
+examples.multiService.deploy : '{IO, Exception} ()   ~55dp8qsr83
+
+examples.multiService.deploy.doc : Doc   ~lo72rfj89i
+
+examples.servePage.api : Database -> [Key] -> HttpRequest ->{Exception, Blobs} HttpResponse   ~lotc8jbc8m
+
+examples.servePage.api.doc : Doc   ~8d32djmcnj
+
+examples.servePage.assets.css : Database -> Key -> '{Route, Exception, Blobs} ()   ~2vhdlchcej
+
+examples.servePage.assets.decompressBlobResult : Optional (Tuple Bytes b) ->{Exception} Text   ~6qaoa1chpb
+
+examples.servePage.assets.home : Database -> Key -> '{Route, Exception, Blobs} ()   ~itru42sfts
+
+examples.servePage.assets.js : Database -> Key -> '{Route, Exception, Blobs} ()   ~no456kqlcj
+
+examples.servePage.deploy : '{IO, Exception} URI   ~iiu8ka4875
+
+examples.servePage.deploy.doc : Doc   ~eb8l59apo6
+
+examples.servePage.deploy.writeSampleAssets : '{IO, Exception} ()   ~t64m5v98ro
+
+examples.servePage.deploy.writeSampleAssets.css : Text   ~4bd01sgqrj
+
+examples.servePage.deploy.writeSampleAssets.html : Text   ~ba4i27t586
+
+examples.servePage.deploy.writeSampleAssets.js : Text   ~4mjj3t69lo
+
+examples.todoApp.README : Doc   ~srmavn6kk6
+
+examples.todoApp.deploy : '{IO, Exception} ServiceHash HttpRequest HttpResponse   ~nmp1hd468e
+
+examples.todoApp.deploy.doc : Doc   ~v7700a7bvo
+
+examples.todoApp.deploy.todoAppHash : ServiceHash HttpRequest HttpResponse   ~maffbdnj4j
+
+type[Data] examples.todoApp.models.TodoItem   ~80ovtg8h5p
+  type TodoItem = examples.todoApp.models.TodoItem.TodoItem Text Boolean Text
+  fields: completed, entry, id
+
+examples.todoApp.models.TodoItem.fromJson : '{unison_json_1_3_5.Decoder} TodoItem   ~m0n09if2mi
+
+examples.todoApp.models.TodoItem.toJson : TodoItem -> Json   ~tabkgih3na
+
+examples.todoApp.resources.addKey : Table Link.Type (Set Text) -> Text ->{Storage.Transaction, Exception} ()   ~391t6732eu
+
+examples.todoApp.resources.deleteKey : Table Link.Type (Set Text) -> Text ->{Storage.Transaction, Exception} ()   ~erg9t54nd1
+
+examples.todoApp.routes.todoService : OrderedTable Text TodoItem -> Database -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Log} ()   ~5uc3p0cmd8
+
+examples.todoApp.routes.todoService.doc : Doc   ~3mlcpkahid
+
+examples.todoApp.undeploy : '{IO, Exception} ()   ~c0f09tksib
+
+examples.todoApp.undeploy.doc : Doc   ~os9mitb22c
+
+exercises.README : Doc   ~3er82e1faj
+
+exercises.README.ch1 : Doc   ~6i8bf6agn0
+
+exercises.admin.console.Reporting.toText : (i ->{g1} Text) -> (o ->{g} Text) -> Reporting i o ->{g, g1} Text   ~97mlpkl76i
+
+exercises.admin.console.Result.toText : (i ->{g1} Text) -> (o ->{g} Text) -> models.Result i o ->{g, g1} Text   ~s7r9jiptdl
+
+type[Data] exercises.admin.console.TrackProgress   ~solp550uel
+  type TrackProgress
+    = exercises.admin.console.TrackProgress.TrackProgress
+        [(Exercise.Number, models.Status)] (Optional Exercise.Number)
+  fields: attempted, next
+
+exercises.admin.console.print : (i ->{g1} Text) -> (o ->{g} Text) -> ExerciseResult i o ->{g, g1, IO, Exception} ()   ~oc2htjl99l
+
+exercises.admin.console.print.HttpRequest : HttpRequest ->{Exception} Text   ~ocdahp11ik
+
+exercises.admin.console.print.HttpResponse : HttpResponse ->{Exception} Text   ~euj6rmj11e
+
+exercises.admin.console.printProgress : TrackProgress ->{IO, Exception} ()   ~4dabasft3r
+
+exercises.admin.console.printProgress.formatTextTuple : List.Nonempty (Exercise.Number, models.Status) -> (Text, Text)   ~3lcf812vd1
+
+exercises.admin.console.printProgress.padHeader : Exercise.Number -> Text -> (Text, Text)   ~i147vhtavd
+
+type[Data] exercises.admin.models.Exercise.Id   ~phsienehi8
+  type Exercise.Id = exercises.admin.models.Exercise.Id.Id Track Exercise.Number
+
+type[Data] exercises.admin.models.Exercise.Number   ~i1c48s6305
+  type Exercise.Number = exercises.admin.models.Exercise.Number.Number Nat Part
+
+exercises.admin.models.Exercise.Number.toText : Exercise.Number -> Text   ~puki22f8se
+
+type[Data] exercises.admin.models.Exercise.Part   ~gfb9ffrvmn
+  type Part = exercises.admin.models.Exercise.Part.Part Nat
+
+type[Data] exercises.admin.models.ExerciseResult   ~v4kkvnvet9
+  type ExerciseResult a b
+    = exercises.admin.models.ExerciseResult.ExerciseResult
+        Exercise.Number Text [models.Result a b]
+
+exercises.admin.models.ExerciseResult.isSuccess : ExerciseResult a b -> models.Status   ~1kj52qv6e6
+
+type[Data] exercises.admin.models.Reporting   ~ude9u1vdgr
+  type Reporting i o
+    = exercises.admin.models.Reporting.ErrorReporting Failure (Reporting i o)
+    | exercises.admin.models.Reporting.Expected o
+    | exercises.admin.models.Reporting.InputOutput (Optional i) (Optional o)
+    | exercises.admin.models.Reporting.InputOutputExpected i o o
+
+type[Data] exercises.admin.models.Result   ~ndrvf8bkeg
+  type models.Result i o
+    = exercises.admin.models.Result.Correct Text (Reporting i o)
+    | exercises.admin.models.Result.Incorrect Text (Reporting i o)
+    | exercises.admin.models.Result.PassThrough Text (Reporting i o)
+    | exercises.admin.models.Result.Error Text (Reporting i o)
+
+exercises.admin.models.Result.isSuccess : models.Result i o -> Boolean   ~5dg7suvfm2
+
+type[Data] exercises.admin.resultsService.Storage   ~c85o9nr5h8
+  type resultsService.Storage
+    = exercises.admin.resultsService.Storage.Storage
+        Database
+        (OrderedTable
+          (models.User, Track.Number, Exercise.Number) [AttemptRecord])
+        (OrderedTable (Track.Number, models.User) [AttemptRecord])
+        (OrderedTable models.User [Track.Number])
+        (OrderedTable Track.Number [Exercise.Number])
+  fields: database, tracks, tracksByUser, userProgress, usersTracks
+
+exercises.admin.resultsService.admin.addChallenge : resultsService.Storage -> Track.Number -> Exercise.Number ->{Exception, unison_cloud_27_2_0.Storage, Random} ()   ~adnckhga2e
+
+exercises.admin.resultsService.admin.countSubmissionsByExercise : '{IO, Exception} [(Exercise.Number, Nat)]   ~lrc26v3013
+
+exercises.admin.resultsService.admin.countSubmissionsByUserExercise : '{IO, Exception} [((models.User, Track.Number, Exercise.Number), Nat)]   ~07pminhfs0
+
+exercises.admin.resultsService.admin.replaceAllTrackChallenges : resultsService.Storage -> Track.Number -> [Exercise.Number] ->{Remote} ()   ~e4b2fvl9rf
+
+exercises.admin.resultsService.admin.setTrackState : '{IO, Exception} ()   ~7md1a75ge4
+
+exercises.admin.resultsService.createStorage : '{Exception, Cloud} resultsService.Storage   ~pvprcjmaq0
+
+exercises.admin.resultsService.db.addResult : resultsService.Storage -> models.User -> AttemptRecord ->{Exception, unison_cloud_27_2_0.Storage, Random} ()   ~j65hip88g9
+
+exercises.admin.resultsService.db.getAllTrackChallenges : resultsService.Storage -> Track.Number ->{Remote} [Exercise.Number]   ~560kq6eope
+
+exercises.admin.resultsService.db.getDistinctLatestAttempts : resultsService.Storage -> models.User -> Track.Number ->{Remote} [AttemptRecord]   ~bieb79i3a9
+
+exercises.admin.resultsService.db.getUserTrackProgress : resultsService.Storage -> models.User -> Track.Number ->{Remote} TrackProgress   ~74hk8vvr66
+
+exercises.admin.resultsService.db.getUserTrackResults : resultsService.Storage -> models.User -> Track.Number ->{Remote} [AttemptRecord]   ~dvt2ab1l5q
+
+exercises.admin.resultsService.db.readUserResults : resultsService.Storage -> (models.User, Track.Number, Exercise.Number) ->{Remote} Optional [AttemptRecord]   ~ujq5p3er29
+
+exercises.admin.resultsService.db.userResultsPrefix : resultsService.Storage -> models.User ->{Remote} [AttemptRecord]   ~jfjc9v0a4u
+
+exercises.admin.resultsService.db.userStartsTrack : resultsService.Storage -> models.User -> Track.Number ->{Exception, unison_cloud_27_2_0.Storage, Random} ()   ~38cf7rqkou
+
+exercises.admin.resultsService.deploys.putUserAttempt : '{IO, Exception} ServiceHash (models.User, AttemptRecord) ()   ~h33ugp244m
+
+exercises.admin.resultsService.deploys.putUserAttempt.impl : resultsService.Storage -> (models.User, AttemptRecord) ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} ()   ~l2q4b4q3gm
+
+exercises.admin.resultsService.deploys.trackProgressService : '{IO, Exception} ServiceHash (models.User, Track.Number) TrackProgress   ~v0a35d72tu
+
+exercises.admin.resultsService.env : '{Exception, Cloud} Environment   ~1jsavvd8b2
+
+exercises.admin.resultsService.hashes.putUserAttempt2 : ServiceHash (models.User, AttemptRecord) ()   ~f9963fbnif
+
+exercises.admin.resultsService.hashes.putUserAttemptV3 : ServiceHash (models.User, AttemptRecord) ()   ~quhseag80i
+
+exercises.admin.resultsService.hashes.putUserAttemptv1 : ServiceHash (models.User, AttemptRecord) ()   ~3nhq0t1pvm
+
+exercises.admin.resultsService.hashes.trackProgressV1 : ServiceHash (models.User, Track.Number) TrackProgress   ~riqibio7j3
+
+exercises.admin.resultsService.hashes.trackProgressV3 : ServiceHash (models.User, Track.Number) TrackProgress   ~mu7rvgtu0k
+
+exercises.admin.resultsService.hashes.trackProgressv2 : ServiceHash (models.User, Track.Number) TrackProgress   ~so3luvihca
+
+exercises.admin.resultsService.hashes.v1 : ServiceHash (models.User, AttemptRecord) ()   ~436fqm7f75
+
+exercises.admin.resultsService.hashes.v2 : ServiceHash (models.User, AttemptRecord) ()   ~u7f34gagrq
+
+exercises.admin.resultsService.hashes.v3 : ServiceHash (models.User, AttemptRecord) ()   ~8bjgkqls9r
+
+type[Data] exercises.admin.resultsService.impl.CredentialsError   ~pomktph58e
+  type impl.CredentialsError
+    = exercises.admin.resultsService.impl.CredentialsError.CredentialsError
+
+exercises.admin.resultsService.impl.getUser : '{IO, Exception} (Text, Text)   ~8mp7248f14
+
+type[Data] exercises.admin.resultsService.models.AttemptRecord   ~197mha89o6
+  type AttemptRecord
+    = exercises.admin.resultsService.models.AttemptRecord.AttemptRecord
+        Track.Number Exercise.Number OffsetDateTime models.Status
+  fields: number, status, timeStamp, track
+
+exercises.admin.resultsService.models.AttemptRecord.fromChallengeResult : OffsetDateTime -> Track.Number -> ExerciseResult i o -> AttemptRecord   ~7vrjpbl3dp
+
+exercises.admin.resultsService.models.AttemptRecord.toText : AttemptRecord -> Text   ~73616qhe9k
+
+type[Data] exercises.admin.resultsService.models.Difficulty   ~3k1iv0r1uj
+  type Difficulty
+    = exercises.admin.resultsService.models.Difficulty.Easy
+    | exercises.admin.resultsService.models.Difficulty.Medium
+    | exercises.admin.resultsService.models.Difficulty.Hard
+
+type[Data] exercises.admin.resultsService.models.Errors.ChallengeExistsForTrack   ~j8muedg68k
+  type ChallengeExistsForTrack = 
+
+type[Data] exercises.admin.resultsService.models.Errors.TrackNotCreated   ~g5066e0hnr
+  type TrackNotCreated = 
+
+type[Data] exercises.admin.resultsService.models.Status   ~hofbekatrh
+  type models.Status
+    = exercises.admin.resultsService.models.Status.Passed
+    | exercises.admin.resultsService.models.Status.Failed
+    | exercises.admin.resultsService.models.Status.NotStarted
+
+exercises.admin.resultsService.models.Status.toText : models.Status -> Text   ~hdjplgd4fb
+
+type[Data] exercises.admin.resultsService.models.Track   ~565rn0hfqh
+  type Track
+    = exercises.admin.resultsService.models.Track.Track Track.Number Text
+  fields: number, title
+
+type[Data] exercises.admin.resultsService.models.Track.Number   ~054bhr9323
+  type Track.Number
+    = exercises.admin.resultsService.models.Track.Number.Number Nat
+
+exercises.admin.resultsService.models.Track.Number.toText : Track.Number -> Text   ~obvbjh4t3k
+
+type[Data] exercises.admin.resultsService.models.User   ~ebcandpcmo
+  type models.User = exercises.admin.resultsService.models.User.User Text Text
+
+exercises.admin.resultsService.models.User.doc : Doc   ~5l0io7e1fq
+
+exercises.admin.resultsService.test.latestChallenges : '{IO, Exception} ()   ~3mrclf2knk
+
+exercises.admin.resultsService.test.printTestProgress : '{IO, Exception} ()   ~8lgbnhi5cc
+
+exercises.admin.resultsService.test.readUserChallenges : '{IO, Exception} [AttemptRecord]   ~9u6c61qc1h
+
+exercises.admin.resultsService.test.testAddChallenge : '{IO, Exception} [Exercise.Number]   ~gqh4biuv8j
+
+exercises.admin.resultsService.test.testAddChallengeRoundtrip : '{IO, Exception} ()   ~o6koscmue6
+
+exercises.admin.resultsService.up.tup3.prefixOrdering : k1 -> (k1, k2, k3) -> Ordering   ~56idddpui0
+
+exercises.admin.validator.Either.tupleRight : Either a b -> Either a c -> Either a (b, c)   ~6tup9gh1of
+
+exercises.admin.validator.Json.Array.contains : Json -> Json -> Boolean   ~jt426qa9ca
+
+exercises.admin.validator.Json.Array.contains.doc : Doc   ~m96t0bh4dp
+
+exercises.admin.validator.Json.isSubset : Json -> Json -> Boolean   ~9qulcjgu4l
+
+exercises.admin.validator.Json.isSubset.doc : Doc   ~kin457673c
+
+exercises.admin.validator.callHttpService : HttpRequest ->{Cloud} Either Failure HttpResponse   ~82ttqd1vd1
+
+exercises.admin.validator.callService : ServiceHash a b -> a ->{Cloud} Either Failure b   ~bqp79ve6oe
+
+exercises.admin.validator.callWebSocketService : URI -> (IOWebSocket ->{g, IO, Threads} ()) ->{g, IO, Exception, Threads} ()   ~mp7flpun7b
+
+exercises.admin.validator.decodeHttpResponse : HttpRequest -> (Body ->{Exception} a) -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure a   ~l4q3p1m4f6
+
+exercises.admin.validator.env : '{Exception, Cloud} Environment   ~lv4ss4v0si
+
+exercises.admin.validator.exercise : Track.Number -> Exercise.Number -> Text -> '{IO, Exception, Cloud, Threads, Stream (models.Result i o)} a ->{IO, Exception} (ExerciseResult i o, TrackProgress)   ~08qi8599lu
+
+exercises.admin.validator.expect : ServiceHash a b -> a -> b -> Text ->{Cloud, Stream (models.Result a b)} ()   ~ba9vr60sf2
+
+exercises.admin.validator.expectFailure : ServiceHash a b -> a -> Text -> Text ->{Cloud, Stream (models.Result a b)} ()   ~5b3ca0g47j
+
+exercises.admin.validator.expectHttpBodyString : HttpRequest -> Nat -> Text -> Text ->{Exception, Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~k3is2bs2kn
+
+exercises.admin.validator.expectHttpCode : HttpRequest -> Nat -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~teg1d51iaq
+
+exercises.admin.validator.expectHttpJsonKeys : HttpRequest -> Nat -> [Text] -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~spo5qin60c
+
+exercises.admin.validator.expectHttpJsonKeys.doc : Doc   ~qfmnkhnkn9
+
+exercises.admin.validator.expectHttpJsonKeys.getKeySet : Json -> Set Text   ~dai7c0i4q3
+
+exercises.admin.validator.expectJson : HttpRequest -> Nat -> (Json -> Json -> Boolean) -> Json -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~vpv60abo6q
+
+exercises.admin.validator.expectTimed : ServiceHash a b -> a -> b -> Remote.Duration -> Text ->{Cloud, Stream (models.Result a b)} ()   ~18knmgma0i
+
+exercises.admin.validator.expectValue : a -> a -> Text ->{Stream (models.Result a a)} ()   ~qgl5oibv2i
+
+exercises.admin.validator.expectWebSocketEcho : Text -> IOWebSocket ->{IO, Threads, Stream (models.Result websockets.Message websockets.Message)} ()   ~hiie5qd0h0
+
+exercises.admin.validator.runHttpWith : HttpRequest -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure HttpResponse   ~73hlejiu4k
+
+exercises.admin.validator.runWith : ServiceHash a b -> a -> Text ->{Cloud, Stream (models.Result a b)} Either Failure b   ~emusk6rlt6
+
+exercises.env : '{Exception, Cloud} Environment   ~pm61d4u77f
+
+exercises.ex1_quickstart.deploy : '{IO, Exception} URI   ~j967fjv4tb
+
+exercises.ex1_quickstart.doc : Doc   ~6mr0npos21
+
+exercises.ex1_quickstart.helloWorld.logic : HttpRequest ->{Exception, Remote, Log} HttpResponse   ~fauhmh3trn
+
+exercises.ex2_nativeService.callService : '{IO, Exception} Nat   ~dedrd7v6rc
+
+exercises.ex2_nativeService.deploy : '{IO, Exception} ServiceHash Nat Nat   ~9duasecs2a
+
+exercises.ex2_nativeService.doc : Doc   ~kvt5n9o857
+
+exercises.ex2_nativeService.failure : Failure   ~qvaon5hjma
+
+exercises.ex2_nativeService.solutions.callService : '{IO, Exception} Nat   ~4v20me6fq4
+  > aka: exercises.solutions.ex2_nativeService.callService
+
+exercises.ex3_microblog.api.createPost : '{Route} ()   ~t5mdgcqegv
+
+exercises.ex3_microblog.api.getPostById : '{Route} ()   ~afmjcfus0d
+
+type[Data] exercises.ex3_microblog.client.User   ~7vcecb76i2
+  type client.User
+    = exercises.ex3_microblog.client.User.User
+        (Optional Text) Text Text (Optional Text)
+  fields: avatar, userHandle, userId, userName
+
+exercises.ex3_microblog.client.User.fromJson : '{unison_json_1_3_5.Decoder} client.User   ~10b8apruvr
+
+exercises.ex3_microblog.client.User.toJson : client.User -> Json   ~68nft0dvfe
+
+exercises.ex3_microblog.db.createAppStorage : '{Exception, Cloud} AppStorage   ~kvqqpbrcc1
+
+type[Data] exercises.ex3_microblog.db.v1.FollowingId   ~ekpj6ick2g
+  type v1.FollowingId
+    = exercises.ex3_microblog.db.v1.FollowingId.FollowingId Text
+
+type[Data] exercises.ex3_microblog.db.v1.FollowingRow   ~mp3tdmvkmf
+  type v1.FollowingRow
+    = exercises.ex3_microblog.db.v1.FollowingRow.FollowingRow
+        v1.UserId v1.UserId OffsetDateTime OffsetDateTime
+  fields: createdAt, follower, target, updatedAt
+
+type[Data] exercises.ex3_microblog.db.v1.PostId   ~1hjsdi77fi
+  type v1.PostId = exercises.ex3_microblog.db.v1.PostId.PostId Text
+
+type[Data] exercises.ex3_microblog.db.v1.PostRow   ~90fv112lub
+  type v1.PostRow
+    = exercises.ex3_microblog.db.v1.PostRow.PostRow
+        v1.PostId OffsetDateTime OffsetDateTime Text v1.UserId
+  fields: body, createdAt, id, updatedAt, userId
+
+type[Data] exercises.ex3_microblog.db.v1.Storage   ~99q5efcjar
+  type v1.Storage
+    = exercises.ex3_microblog.db.v1.Storage.Storage
+        Database
+        (Cell v1.UserId)
+        (OrderedTable UserHandle v1.UserId)
+        (OrderedTable v1.UserId v1.UserRow)
+        (OrderedTable (v1.UserId, OffsetDateTime) v1.PostId)
+        (OrderedTable v1.PostId v1.PostRow)
+        (OrderedTable (v1.UserId, v1.UserId) v1.FollowingRow)
+  fields: database, following, postsTable, userHandleIdTable, userIdsTable, userPostsTable, usersTable
+
+type[Data] exercises.ex3_microblog.db.v1.UserId   ~rqld4matjd
+  type v1.UserId = exercises.ex3_microblog.db.v1.UserId.UserId Text
+
+type[Data] exercises.ex3_microblog.db.v1.UserRow   ~5uh7ic81lj
+  type v1.UserRow
+    = exercises.ex3_microblog.db.v1.UserRow.UserRow
+        v1.UserId OffsetDateTime OffsetDateTime UserHandle Text (Optional URI)
+  fields: avatar, createdAt, id, name, updatedAt, userHandle
+
+exercises.ex3_microblog.db.v1.createPost : v1.Storage -> v1.UserId -> Text ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} v1.PostRow   ~vg9f6jpofb
+
+exercises.ex3_microblog.db.v1.createuser : v1.Storage -> UserHandle -> Text -> Optional URI ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} v1.UserRow   ~4mj995cml9
+
+exercises.ex3_microblog.db.v1.followUser : v1.Storage -> v1.UserId -> v1.UserId ->{Exception, unison_cloud_27_2_0.Storage, Remote} v1.FollowingRow   ~45ml95q745
+
+exercises.ex3_microblog.db.v1.getPostById : v1.Storage -> v1.PostId ->{Exception, unison_cloud_27_2_0.Storage, Remote} v1.PostRow   ~1brk55tv4t
+
+exercises.ex3_microblog.db.v1.getPostsByUserId : v1.Storage -> UserHandle ->{Exception, unison_cloud_27_2_0.Storage, Remote} [v1.PostRow]   ~h6atq90lvq
+
+exercises.ex3_microblog.db.v1.getUserByHandle : v1.Storage -> UserHandle ->{Exception, unison_cloud_27_2_0.Storage, Remote} v1.UserRow   ~rps2tqh55a
+
+type[Data] exercises.ex3_microblog.db.v2.AppStorage   ~lv89n1fkj3
+  type AppStorage
+    = exercises.ex3_microblog.db.v2.AppStorage.AppStorage
+        Database
+        (OrderedTable UserHandle v2.UserRow)
+        (OrderedTable (UserHandle, OffsetDateTime) v2.PostRow)
+        (OrderedTable v2.PostId v2.PostRow)
+        (OrderedTable (UserHandle, UserHandle) v2.FollowingRow)
+  fields: database, followingTable, postsTable, userHandleToUser, userPostsTable
+
+type[Data] exercises.ex3_microblog.db.v2.FollowingId   ~faqo5legik
+  type v2.FollowingId = exercises.ex3_microblog.db.v2.FollowingId.FollowingId UID
+
+type[Data] exercises.ex3_microblog.db.v2.FollowingRow   ~dh35ljii7q
+  type v2.FollowingRow
+    = exercises.ex3_microblog.db.v2.FollowingRow.FollowingRow
+        v2.FollowingId UserHandle UserHandle OffsetDateTime
+  fields: createdAt, follower, followingId, target
+
+type[Data] exercises.ex3_microblog.db.v2.PostId   ~sghl0mseon
+  type v2.PostId = exercises.ex3_microblog.db.v2.PostId.PostId UID
+
+type[Data] exercises.ex3_microblog.db.v2.PostRow   ~8uhsucmoqt
+  type v2.PostRow
+    = exercises.ex3_microblog.db.v2.PostRow.PostRow
+        v2.PostId OffsetDateTime Text UserHandle
+  fields: body, createdAt, id, userHandle
+
+type[Data] exercises.ex3_microblog.db.v2.UserHandle   ~gv2o8e43g5
+  type UserHandle = exercises.ex3_microblog.db.v2.UserHandle.UserHandle Text
+
+type[Data] exercises.ex3_microblog.db.v2.UserRow   ~jhl5v2pnc9
+  type v2.UserRow
+    = exercises.ex3_microblog.db.v2.UserRow.UserRow
+        UserHandle Text (Optional URI)
+  fields: avatar, name, userHandle
+
+exercises.ex3_microblog.deploy : '{IO, Exception} URI   ~o3p54ldpm4
+
+exercises.ex3_microblog.doc : Doc   ~upeh6v1cuu
+
+exercises.ex3_microblog.doc.JsonSchema : Doc   ~cq1olh2h1h
+
+exercises.ex3_microblog.doc.expectedRoutes : Doc   ~n6ka3jo3md
+
+type[Data] exercises.ex4_oauth.UserId   ~at8in6384e
+  type ex4_oauth.UserId = exercises.ex4_oauth.UserId.UserId Text
+
+exercises.ex4_oauth.deploy : '{IO, Exception} URI   ~vj7fb5m3ii
+
+exercises.ex4_oauth.doc : Doc   ~i4rb2aa5g4
+
+exercises.ex4_oauth.doc.pt1 : #ej86si0ur1   ~16643u4q9s
+
+exercises.ex4_oauth.doc.pt2 : Doc   ~b8jaiq3e7q
+
+exercises.ex4_oauth.doc.pt3 : Doc   ~3k6fnvc2jp
+
+exercises.ex4_oauth.doc.pt4 : Doc   ~omj92qpgd5
+
+exercises.ex4_oauth.solutions.deploy : '{IO, Exception} URI   ~cif2d1bpkl
+
+exercises.ex4_oauth.solutions.todoService : OrderedTable (ex4_oauth.UserId, Text) TodoItem -> Database -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Log, Auth ex4_oauth.UserId} ()   ~mv4iq26g95
+  > aka: exercises.solutions.ex4_oauth.todoService
+
+exercises.ex4_oauth.todoService : OrderedTable (ex4_oauth.UserId, Text) TodoItem -> Database -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Log} ()   ~t6pmmej64u
+
+exercises.ex4_oauth.todoService.html : Text   ~vu619qlhbb
+
+exercises.ex5_webSockets.chatHandlerService : Cell (Set unison_cloud_27_2_0.websockets.WebSocket) -> HttpRequest -> Either HttpResponse (unison_cloud_27_2_0.websockets.WebSocket ->{Exception, Remote, unison_cloud_27_2_0.websockets.WebSockets} ())   ~uohjohjb68
+
+exercises.ex5_webSockets.deploy : '{IO, Exception} URI   ~ipuuamp4f8
+
+exercises.ex5_webSockets.doc : Doc   ~fecv9gp4qc
+
+exercises.ex5_webSockets.doc.aboutWebSockets : Doc   ~duvftci367
+
+exercises.ex5_webSockets.doc.pt1 : Doc   ~92e6tb3o8n
+
+exercises.ex5_webSockets.doc.pt2 : Doc   ~mnr9h0qp8k
+
+exercises.ex5_webSockets.doc.pt3 : Doc   ~k1eqp06vkc
+
+exercises.ex5_webSockets.doc.summary : Doc   ~kosq29coak
+  > aka: exercises.ex5_webSockets.aboutWebsockets.summary
+
+exercises.ex5_webSockets.webSocketChatHandler : Cell (Set unison_cloud_27_2_0.websockets.WebSocket) -> Text -> unison_cloud_27_2_0.websockets.WebSocket ->{Exception, Remote, unison_cloud_27_2_0.websockets.WebSockets} ()   ~t4tdq2nesp
+
+exercises.ex5_webSockets.webSocketHandler : unison_cloud_27_2_0.websockets.WebSocket ->{Exception, Remote, unison_cloud_27_2_0.websockets.WebSockets} ()   ~41susgbjke
+
+exercises.ex5_webSockets.webSocketHandler.doc : Doc   ~s5b6soe9dg
+
+exercises.ex5_webSockets.webSocketHttpHandler : HttpRequest -> Either HttpResponse (unison_cloud_27_2_0.websockets.WebSocket ->{Exception, Remote, unison_cloud_27_2_0.websockets.WebSockets} ())   ~p6qj7tclir
+
+exercises.ex5_webSockets.webSocketStateHandler : Cell (Set unison_cloud_27_2_0.websockets.WebSocket) -> unison_cloud_27_2_0.websockets.WebSocket ->{Exception, Remote, unison_cloud_27_2_0.websockets.WebSockets} ()   ~iq5bi44unr
+
+exercises.solutions.ex1_quickstart.deploy : '{IO, Exception} URI   ~6el936n2l5
+
+exercises.solutions.ex2_nativeService.deploy : '{IO, Exception} ServiceHash Nat Nat   ~ushac38l8d
+  > aka: exercises.ex2_nativeService.solutions.squareService
+
+exercises.solutions.ex3_microblog.api : AppStorage -> HttpRequest ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} HttpResponse   ~4hs8248mar
+
+exercises.solutions.ex3_microblog.api.createPost : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Random} ()   ~q2iragjedg
+
+exercises.solutions.ex3_microblog.api.createUser : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Random} ()   ~ubkiq5kl4v
+
+exercises.solutions.ex3_microblog.api.followUser : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote, Random} ()   ~7fcijoeq4a
+
+exercises.solutions.ex3_microblog.api.getFeed : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote} ()   ~9r2odis99q
+
+exercises.solutions.ex3_microblog.api.getPostById : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage, Remote} ()   ~rl7du417gk
+
+exercises.solutions.ex3_microblog.api.getUserPosts : AppStorage -> '{Route, Exception, unison_cloud_27_2_0.Storage} ()   ~v65e0t9c94
+
+type[Data] exercises.solutions.ex3_microblog.client.CreatePost   ~q0r07u1i8l
+  type CreatePost
+    = exercises.solutions.ex3_microblog.client.CreatePost.CreatePost Text Text
+
+exercises.solutions.ex3_microblog.client.CreatePost.fromJson : '{unison_json_1_3_5.Decoder} CreatePost   ~gblnt7vebq
+
+exercises.solutions.ex3_microblog.client.FollowRequest.fromJson : '{unison_json_1_3_5.Decoder} (Text, Text)   ~nhptd10abh
+
+exercises.solutions.ex3_microblog.client.FollowRequest.fromJson.doc : Doc   ~257pi095j2
+
+exercises.solutions.ex3_microblog.client.FollowingId.toJson : v2.FollowingId ->{Exception} Json   ~bfnjt9m6h5
+
+type[Data] exercises.solutions.ex3_microblog.client.Post   ~acmosjf7fm
+  type client.Post
+    = exercises.solutions.ex3_microblog.client.Post.Post Text Text Text Text
+  fields: body, name, timestamp, userHandle
+
+exercises.solutions.ex3_microblog.client.Post.doc : Doc   ~smnm25u1e9
+
+exercises.solutions.ex3_microblog.client.Post.toJson : client.Post -> Json   ~age0cb5230
+
+exercises.solutions.ex3_microblog.client.PostId.toJson : v2.PostId ->{Exception} Json   ~u7jb17fuut
+
+exercises.solutions.ex3_microblog.client.Posts.toJson : [client.Post] -> Json   ~qk0hj7b5f7
+
+type[Data] exercises.solutions.ex3_microblog.client.UserId   ~o56kr2rj1b
+  type client.UserId
+    = exercises.solutions.ex3_microblog.client.UserId.UserId Text
+
+exercises.solutions.ex3_microblog.client.UserId.toJson : client.UserId -> Json   ~gnrf34ds1m
+
+exercises.solutions.ex3_microblog.db.createPost : AppStorage -> UserHandle -> Text ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} v2.PostRow   ~1eamghgu4u
+
+exercises.solutions.ex3_microblog.db.followUser : AppStorage -> UserHandle -> UserHandle ->{Exception, unison_cloud_27_2_0.Storage, Remote, Random} v2.FollowingRow   ~266qesevr8
+
+exercises.solutions.ex3_microblog.db.getFeedPosts : AppStorage -> UserHandle ->{Remote} [v2.PostRow]   ~e3r4u34t8n
+
+exercises.solutions.ex3_microblog.db.getPostsByUserHandle : AppStorage -> UserHandle ->{Storage.Transaction, Exception, Batch} [v2.PostRow]   ~cjdnvpjua4
+
+exercises.solutions.ex3_microblog.deploy : '{IO, Exception} URI   ~elo6t5chpr
+
+exercises.solutions.ex3_microblog.instantToOffsetDateTime : '{Remote} OffsetDateTime   ~do947r2h24
+
+exercises.solutions.ex4_oauth.deploy : '{IO, Exception} URI   ~2evt8u10q9
+
+exercises.solutions.ex4_oauth.getSessionOr401 : (ex4_oauth.UserId ->{g} ()) ->{g, Route, Auth ex4_oauth.UserId} ()   ~9kt5gcojbv
+
+exercises.submit.ex1_quickstart : '{IO, Exception} ()   ~etasbqcqs7
+
+exercises.submit.ex2_nativeService : '{IO, Exception} ()   ~u4gcg1dtp6
+
+exercises.submit.ex3_microblog.FollowingId.fromJson : Body ->{Exception} Text   ~f41bcv0dkr
+
+exercises.submit.ex3_microblog.PostId.fromJson : Body ->{Exception} Text   ~88ktobn0j7
+
+exercises.submit.ex3_microblog.UserId.fromJson : Body ->{Exception} Text   ~pdpchktg1q
+
+exercises.submit.ex3_microblog.bobFollowsAlice : URI -> Text -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure Text   ~2so24a52ue
+
+exercises.submit.ex3_microblog.createPostForUser : URI -> Text -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure Text   ~8nl4tj0b78
+
+exercises.submit.ex3_microblog.createSampleUserAlice : URI ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure Text   ~1395ktt3o1
+
+exercises.submit.ex3_microblog.createSampleUserBob : URI ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} Either Failure Text   ~6bge43gs6u
+
+exercises.submit.ex3_microblog.getPostById : URI -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~2hsc1beqol
+
+exercises.submit.ex3_microblog.getUserFeed : URI -> Text ->{Cloud, Stream (models.Result HttpRequest HttpResponse)} ()   ~niq1bmrt9h
+
+exercises.submit.ex3_microblog.pt1 : '{IO, Exception} ()   ~f8h98mjdhg
+
+exercises.submit.ex3_microblog.pt2 : '{IO, Exception} ()   ~jmip5nj2bu
+
+exercises.submit.ex3_microblog.roundTrip : '{IO, Exception} ()   ~g902glavnm
+
+exercises.submit.ex4_oauth.roundTrip : '{IO, Exception} ()   ~edsec6prb1
+
+exercises.submit.ex5_webSockets.pt1 : '{IO, Exception} ()   ~juus6s5b8o
+
+exercises.submit.ex5_webSockets.pt2 : '{IO, Exception} ()   ~lp18f9567s
+
+exercises.submit.track1_title : Text   ~59ni4ugk9e
+
+filePathBasename : FilePath -> Text   ~ljjn9q769v
+
+filePathText : FilePath -> Text   ~clab8d2gig
+
+findFirstNfo : [Text] -> Optional Text   ~7hkl3bv9ej
+
+findFirstVideo : [Text] -> Optional Text   ~l9v74mekdf
+
+initDb : '{IO, Exception} ()   ~dl4s2dfagr
+
+isNfo : Text -> Boolean   ~j09d4isjmp
+
+isVideo : Text -> Boolean   ~kbopqh6n7u
+
+type[Data] kernel.cache.Cached   ~hjebjqdt7h
+  type Cached a = kernel.cache.Cached.Cached Text (Optional a) (Optional Text)
+  fields: cacheError, cacheKey, cachedValue
+
+kernel.cache.Cached.fromJson : '{g, unison_json_1_3_5.Decoder} t -> '{g, unison_json_1_3_5.Decoder} Cached t   ~jc9vrbps8t
+
+kernel.cache.Cached.legacyKey.test : [test.Result]   ~khrn8267gv
+
+kernel.cache.Cached.roundtrip.test : [test.Result]   ~m61pq5lp2c
+
+kernel.cache.Cached.toJson : (i ->{g} Json) -> Cached i ->{g} Json   ~hf6imd75gt
+
+kernel.cache.readCachedWith : PreparedQuery r a Text -> '{g, unison_json_1_3_5.Decoder} t -> Text -> Int ->{g, Postgres} Optional (Either Text t)   ~5p4njbdslq
+
+kernel.cache.writeCachedWith : PreparedCommand r a1 -> (i ->{g} Json) -> Text -> Int -> Either a i ->{g, Postgres} ()   ~mv1ejhbu91
+
+kernel.proc.execute : Text -> [Text] ->{IO, Exception} (Nat, Text, Text)   ~c2sncikplf
+
+kernel.score.pickBest : (i ->{g} Float) -> [(i, Nat)] ->{g} Optional (i, Nat)   ~dkcs9pah7m
+
+kernel.score.pickBest.test : [test.Result]   ~83gk5vl9em
+
+kernel.score.popularityRatio : Float   ~8g9740qdms
+
+kernel.score.popularityWinner : (i ->{g} Float) -> [(i, a)] ->{g} Optional ((i, a), Float)   ~bvgu5rs41u
+
+kernel.score.resolveTie : (i ->{g} Float) -> [(i, a)] ->{g} Optional (i, a)   ~p2ml1nocia
+
+kernel.score.scoreThreshold : Nat   ~du7dphs6nq
+
+kernel.score.tiedAtBest : [(a, Nat)] -> Optional (Nat, [(a, Nat)])   ~rpp0j5j4ea
+
+metadata.licenses.cc0 : LicenseType   ~9p9aseftov
+
+metadata.licenses.cc0.doc : Doc   ~uf62umba67
+
+metadata.licenses.types.cc0.text : Doc   ~b3v0i64its
+
+mig : '{IO, Exception} ()   ~9r69rq8ghk
+
+parseConfigLine : Text -> Optional FilePath   ~42r9dr7380
+
+parseNatBefore : Text -> Text -> Optional Nat   ~9on5jiijuf
+
+pathJoin : FilePath -> Text -> FilePath   ~nthkao31jq
+
+primaryAudio : Movie -> Optional Audio   ~eoidhkdesl
+
+resetDb : '{IO, Exception} ()   ~19her0312j
+
+sampleNfo : Text   ~8eeek4870o
+
+silentBranches : '{Each, Throw XMLError} a -> [a]   ~tbg86b9bdt
+
+subDemo : '{IO, Exception} ()   ~9re2nkvm7n
+
+testDetails : Details   ~puhon90qj6
+
+testSeasonOneEp : Season   ~kflrj63eoj
+
+testShowDetails : ShowDetails   ~mqprj7las2
+
+textAfter : Text -> Text -> Optional Text   ~u0dnge8252
+
+textBetween : Text -> Text -> Text -> Optional Text   ~tkiejfkiss
+
+toJsonOpt : (a ->{g} Json) -> Optional a ->{g} Json   ~07225supes
+
+tryXml : '{Throw XMLError} a -> Optional a   ~tf3kgdkq44
+
+uniDork.alreadyImported : PreparedQuery r a Text -> Text ->{Postgres} Boolean   ~n2o18b8kkr
+
+uniDork.batchSize : Nat   ~la4ok5756a
+
+uniDork.batchedMain : Config -> Boolean -> Text ->{IO, Exception} ()   ~ndnkor34js
+
+uniDork.batchedRun : Config ->{IO, Exception} ()   ~mdfg66tc41
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]   ~qagsrv8lia
+
+uniDork.hasFlag : flag -> [flag] -> Boolean   ~89a011jsp6
+
+uniDork.nonFlags : [Text] -> [Text]   ~qn54p8b4p0
+
+uniDork.processBatch : Config -> Boolean -> Nat -> Nat -> Nat -> mutable.Ref {IO} (Nat, Nat) -> [(FilePath, Nat)] ->{IO, Exception} ()   ~74jvgapfe3
+
+uniDork.processOne : Config -> Boolean -> PreparedQuery rI aI Text -> PreparedCommand rF aF -> PreparedCommand r20 a20 -> PreparedCommand r19 a19 -> PreparedCommand r18 a18 -> PreparedCommand r17 a17 -> PreparedCommand r16 a16 -> PreparedCommand r15 a15 -> PreparedCommand r14 a14 -> PreparedCommand r13 a13 -> PreparedCommand r12 a12 -> PreparedCommand r11 a11 -> PreparedCommand r10 a10 -> PreparedCommand r9 a9 -> PreparedCommand r8 a8 -> PreparedCommand r7 a7 -> PreparedCommand r6 a6 -> PreparedCommand r5 a5 -> PreparedCommand r4 a4 -> PreparedCommand r3 a3 -> PreparedCommand r2 a2 -> PreparedCommand r1 a1 -> PreparedCommand r a -> FilePath ->{IO, Exception, Postgres} ()   ~c48trq9kbt
+
+uniDork.renameNewCombined : Config -> Text -> Boolean -> '{IO, Exception} ()   ~pb1ororelr
+
+uniDork.runBatchSafe : Config -> Boolean -> Nat -> Nat -> Nat -> Nat -> Nat -> mutable.Ref {IO} (Nat, Nat) -> [(FilePath, Nat)] ->{IO, Exception} ()   ~l3l67d0hsv
+
+versionsRun : '{IO, Exception} ()   ~jm7vf6724k
+
+videoExtensions : [Text]   ~ise6o37smj
+

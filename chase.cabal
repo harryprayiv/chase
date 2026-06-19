@@ -109,6 +109,35 @@ library vendor-purescript-cst
     happy:happy >= 1.20
 
 -- ------------------------------------------------------------------
+-- chase-annotations sublibrary
+--
+-- The shared data model (Chase.Types) plus the annotation JSON codec
+-- (Chase.Annotations.Json). Deliberately thin: aeson/containers/text/
+-- directory/bytestring only, no ghc-lib-parser, no grace, no network.
+-- Both the deterministic chase core and the Unison client depend on it,
+-- so the annotation format is defined in exactly one place.
+-- ------------------------------------------------------------------
+
+library chase-annotations
+  import:           warnings
+  visibility:       public
+  hs-source-dirs:   src-annotations
+  default-extensions:
+    LambdaCase
+    OverloadedStrings
+    ScopedTypeVariables
+  exposed-modules:
+    Chase.Types
+    Chase.Annotations.Json
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , aeson                >= 2.0
+    , bytestring
+    , containers
+    , directory
+    , text
+
+-- ------------------------------------------------------------------
 -- chase library proper (deterministic core, no network deps)
 -- ------------------------------------------------------------------
 
@@ -121,18 +150,20 @@ library
     ScopedTypeVariables
   exposed-modules:
     Chase
-    Chase.Annotations.Json
     Chase.Coverage
     Chase.Parse
     Chase.Parse.Haskell
     Chase.Parse.PureScript
     Chase.Pipeline
     Chase.Render
-    Chase.Types
+  reexported-modules:
+    Chase.Types,
+    Chase.Annotations.Json
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
     , bytestring
+    , chase:chase-annotations
     , containers
     , directory
     , filepath
@@ -145,10 +176,10 @@ library
 -- ------------------------------------------------------------------
 -- chase-codebase sublibrary (Unison local-API client)
 --
--- Lives in src-codebase/ and depends only on http-client/http-types
--- plus aeson/text/containers/bytestring. No grace, no chase core: the
--- Unison client is a leaf with a tiny closure, so the deterministic
--- core stays network-free and the client stays decoupled from grace.
+-- Network client (http-client/http-types) plus the annotation-merge
+-- and chase-format renderer for Unison codebases. Depends on the thin
+-- chase-annotations lib for the shared model, but never on the parser
+-- core or grace: still a small closure with no ghc-lib-parser.
 -- ------------------------------------------------------------------
 
 library chase-codebase
@@ -157,10 +188,14 @@ library chase-codebase
   hs-source-dirs:   src-codebase
   exposed-modules:
     Chase.Unison.Api
+    Chase.Unison.Extract
+    Chase.Unison.Annotate
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
+    , async
     , bytestring
+    , chase:chase-annotations
     , containers
     , http-client
     , http-types
@@ -168,11 +203,6 @@ library chase-codebase
 
 -- ------------------------------------------------------------------
 -- chase-grace-bridge sublibrary
---
--- Lives in src-bridge/ to keep the main library's source tree free of
--- modules that depend on grace. The bridge is a deliberate extension
--- with its own dependency closure (grace pulls in openai, http-client,
--- megaparsec, and more).
 -- ------------------------------------------------------------------
 
 library chase-grace-bridge
@@ -230,14 +260,16 @@ executable chase-annotate
     , text
 
 -- ------------------------------------------------------------------
--- chase-unison executable (Unison local-API probe)
+-- chase-unison executable (Unison local-API probe + extractor)
 -- ------------------------------------------------------------------
 
 executable chase-unison
   import:           warnings
-  hs-source-dirs:   app
+  hs-source-dirs:   app-unison
   main-is:          ChaseUnison.hs
   build-depends:
     , base
+    , chase:chase-annotations
     , chase:chase-codebase
+    , containers
     , text

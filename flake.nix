@@ -112,11 +112,17 @@
               name = "ucm-serve";
               runtimeInputs = [ pkgs.unison-ucm ];
               text = ''
-                # Starts the codebase server with no interactive REPL.
-                # ucm prints the API base URL (scheme://host:port/token) on
-                # startup; copy it and run:
-                #   chase-unison <thatUrl> <project> <branch> [namespace]
-                exec ucm headless "$@"
+                # Serve the local codebase API on a fixed port + token so the
+                # base URL is deterministic. Optional arg: path to a specific
+                # codebase (a .unison dir). With no arg, serves the default
+                # global codebase, where your projects normally live.
+                port="''${UCM_PORT:-5858}"
+                token="''${UCM_TOKEN:-chase}"
+                cb=()
+                if [ "$#" -gt 0 ]; then cb=(--codebase "$1"); fi
+                echo "codebase API base: http://127.0.0.1:$port/$token"
+                echo "  e.g. chase-unison extract http://127.0.0.1:$port/$token <project> <branch>"
+                exec ucm "''${cb[@]}" headless --port "$port" --token "$token"
               '';
             })
           ];
