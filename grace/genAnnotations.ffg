@@ -1,13 +1,28 @@
-# Generate annotations for one module given its chase bundle skeleton.
+# Generate annotations for one module, from its chase skeleton AND its
+# source.
 #
 # Invoked from Haskell as a typed function. The schema below drives
-# OpenAI structured output via Grace's toJSONSchema; the model cannot
-# return malformed shapes.
+# structured output via Grace's toJSONSchema; the model cannot return
+# malformed shapes.
+#
+# Two changes after measuring a local 7B on Pelotero.DB.Pool, 2026-09-26.
+#
+# The source is now in the prompt. The skeleton has no function bodies,
+# so a model asked for behavioural facts from signatures alone has
+# nothing to draw on and restates the type: nine invariants of the form
+# "acquire creates a connection pool using the provided DBConfig", twice
+# through a retry loop that told it not to.
+#
+# The examples below are real invariants from chase's own bundle. Two
+# retries with an instruction did not move the register; showing what a
+# good invariant looks like is the thing left to try. They are chosen to
+# make the contrast explicit rather than to be imitated literally.
 
 \arguments ->
 
 let key = arguments.key
 let bundle = arguments.bundle
+let source = arguments.source
 let modName = arguments.modName
 let driftWarnings = arguments.driftWarnings
 
@@ -15,38 +30,96 @@ let driftSection =
       if length driftWarnings == 0
       then ""
       else "
-        The previous attempt produced these drift warnings:
+        Your previous attempt produced these warnings. Fix exactly these
+        and keep everything else:
 
         ${fold { cons: \x y -> "- ${x}\n${y}", nil: "" } driftWarnings}
 
-        Do not reference function names that do not appear in the bundle.
+        Do not delete annotations to avoid a warning. Fewer annotations is
+        a worse answer, not a safer one.
         "
 
 in  prompt
       { key
       , text: "
-          You are generating structured annotations for the Haskell or
-          PureScript module ${modName}.
+          You are writing chase annotations for the module ${modName}.
 
-          Chase bundle (structural skeleton, function bodies omitted):
+          An annotation records what a maintainer cannot see from the type
+          signature. The signature is already in the file; repeating it in
+          English is worthless.
+
+          These are real invariants from this project, and they are the
+          standard to meet:
+
+            renderCoverage :: Text -> Maybe [(Text, [TestRef])] -> [Text]
+              ! Nothing -> [] (no coverage analysis ran; emit nothing)
+              ! Just covMap with empty refs -> ['  ? no test references']
+
+            preprocessCpp :: Text -> Text
+              ! blanks rather than deletes: each stripped line becomes
+                T.empty so line numbers in the resulting text match the
+                original one-for-one
+              ! preserves BOTH branches of #if/#else as live code
+
+            buildTestIndex :: [TestBinding] -> TestRefIndex
+              ! self-references (a binding referring to its own name) are
+                filtered out before indexing
+              ! duplicate refs from the same (module, function) are
+                coalesced; the line of the FIRST occurrence wins
+
+          Each one names something specific: a case and its result, a
+          choice and its consequence, an ordering, a filter. None of them
+          could be guessed from the type.
+
+          These would all be rejected, and they are what a model writes
+          when it has not read the body:
+
+            ! acquire creates a connection pool using the provided DBConfig
+            ! runSession executes a session within the provided connection pool
+            ! renderDBError converts a DBError into a readable text message
+
+          Here is the module's structural skeleton. It gives you every
+          signature in the file, the imports, the data declarations, and
+          the invariants already recorded for neighbouring functions:
 
           ${bundle}
 
+          Here is the module's SOURCE, including the function bodies the
+          skeleton omits. This is where the facts are. Read the body of a
+          function before writing anything about it:
+
+          ${source}
+
           For each top-level signature, emit at most one invariant whose
-          'function' field exactly matches the signature name in the bundle.
-          The invariant's 'body' is a list of short factual statements about
-          the function's behavior, effects, or invariants. Do not invent
-          behavior you cannot infer from the signature, name, and surrounding
-          context.
+          'function' field exactly matches the signature name.
 
-          Emit decisions only for non-obvious design choices visible in the
-          module's shape. Affects must be a list of signature names that
-          appear verbatim in the bundle.
+          The invariant's 'body' is a list of short factual statements
+          drawn FROM THE BODY of that function: which other function it
+          calls and with what arguments, which constant or setting it
+          uses, what it does in the failing or empty case, what order
+          things happen in, what it deliberately does not do. Name things.
+          A statement with no identifier in it is usually a restatement.
 
-          Emit open issues only for clear hazards visible in the code shape
-          (unsafe assumptions, partial functions, obvious gaps).
+          If the body gives you nothing beyond the type, emit no
+          invariant for that function. An absent annotation is honest; a
+          vacuous one is noise.
 
-          Prefer fewer high-confidence annotations to many low-confidence ones.
+          'consumes' lists functions ELSEWHERE that call this one, if the
+          source shows them. It is not a list of imports and not a list of
+          modules. When you do not know, leave it empty.
+
+          Emit a decision only when the source contains a COMMENT that
+          gives a reason for a choice. Quote that reason. If no comment
+          gives a reason, emit no decisions: a rationale you worked out
+          yourself is not the author's.
+
+          Emit an open issue only for a hazard in code that EXISTS: a
+          partial function, an unchecked assumption, a case that is
+          silently dropped. Never write that something is missing, not
+          implemented, or should do X. If the function is there, describe
+          what it actually gets wrong or nothing at all.
+
+          Prefer three specific invariants to nine vague ones.
 
           ${driftSection}
         "

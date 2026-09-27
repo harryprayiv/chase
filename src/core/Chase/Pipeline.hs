@@ -8,13 +8,17 @@ module Chase.Pipeline
   , runChase
   , attachAnnotations
   , checkAnnotationDrift
+  , annotationScore
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import qualified Data.Set as Set
+import Data.Set (Set)
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
+import Data.Char (isAlpha, isAlphaNum, isDigit, isUpper)
 import Control.Monad (forM, forM_, when)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Time (getCurrentTime, defaultTimeLocale, formatTime)
@@ -213,11 +217,34 @@ attachAnnotations annMap cf =
       , chaseTopologies = annTopologies
       }
 
+-- | Drift checks over a merged ChaseFile.
+--
+-- Three families. NAME checks find annotations pointing at functions the
+-- file does not define. The EMPTINESS check finds an invariant that
+-- exists but says nothing: its lines introduce no name the signature did
+-- not already carry. The FABRICATION check finds an open issue that
+-- asserts something is absent when the file defines it.
+--
+-- Both of the latter were added on 2026-09-26 against measured output
+-- from a local 7B annotating Pelotero.DB.Pool. Its first attempt produced
+-- ten invariants of which eight were the type restated in English
+-- ("runTransaction is a function that runs the given transaction using
+-- the given connection pool"), and every name check passed. Told that its
+-- invariants restated the signature, its next attempt deleted the
+-- invariants and filed eight open issues instead, claiming among other
+-- things that defaultDBConfig "is not implemented" and that loadDBConfig
+-- "should read database configuration from environment variables", for
+-- functions whose bodies are in the file. Both failures are mechanical
+-- and neither was visible to the checker as it stood.
 checkAnnotationDrift :: ChaseFile -> [Text]
 checkAnnotationDrift ChaseFile{..} =
-  let validNames  = map sigName chaseSignatures
-                 <> map sigName chaseForeignImports
-                 <> map patName chasePatterns
+  let sigsByName =
+        Map.fromList
+          (  [ (sigName s, sigVerbatim s) | s <- chaseSignatures ]
+          <> [ (sigName s, sigVerbatim s) | s <- chaseForeignImports ]
+          <> [ (patName p, patVerbatim p) | p <- chasePatterns ]
+          )
+      validNames  = Map.keys sigsByName
       invMissing  =
         [ "invariant references unknown function: " <> invFunction i
         | i <- chaseInvariants
@@ -237,7 +264,123 @@ checkAnnotationDrift ChaseFile{..} =
         , n <- oiAffects i
         , n `notElem` validNames
         ]
-  in invMissing <> decMissing <> issueMissing
+      invEmpty =
+        [ "invariant for " <> fn
+            <> " repeats the type. Replace it with a fact the type cannot carry:"
+            <> " name another function it calls, a constant or setting it uses,"
+            <> " an ordering that matters, or what happens in the failing case."
+            <> " Keep the invariant; make it specific."
+        | i <- chaseInvariants
+        , let fn = invFunction i
+        , Just sig <- [Map.lookup fn sigsByName]
+        , not (null (invLines i))
+        , not (saysSomethingNew fn sig (invLines i))
+        ]
+      issueFabricated =
+        [ "open_issue " <> oiName i
+            <> " says something is absent that this file defines ("
+            <> T.intercalate ", " present
+            <> "). An open issue records a hazard in code that EXISTS."
+            <> " If the code is there, either describe the real hazard or"
+            <> " return no open issue for it."
+        | i <- chaseOpenIssues
+        , claimsAbsence (oiWhat i) || claimsAbsence (oiWhy i)
+        , let present = [ n | n <- oiAffects i, n `elem` validNames ]
+        , not (null present)
+        ]
+  in invMissing <> decMissing <> issueMissing <> invEmpty <> issueFabricated
+
+-- | How good a candidate annotation set is, for choosing between
+-- attempts: the number of invariants that pass every check, and the
+-- number of warnings. More good invariants wins; on a tie, fewer
+-- warnings wins.
+--
+-- This exists because the retry loop used to keep the LAST attempt
+-- unconditionally, and a 7B given a criticism of its invariants
+-- responded by deleting them. An attempt that produces less than the one
+-- before it is not an improvement, and the loop has to be able to say so.
+annotationScore :: ChaseFile -> (Int, Int)
+annotationScore cf@ChaseFile{..} =
+  let sigsByName =
+        Map.fromList
+          (  [ (sigName s, sigVerbatim s) | s <- chaseSignatures ]
+          <> [ (sigName s, sigVerbatim s) | s <- chaseForeignImports ]
+          <> [ (patName p, patVerbatim p) | p <- chasePatterns ]
+          )
+      good =
+        length
+          [ ()
+          | i <- chaseInvariants
+          , Just sig <- [Map.lookup (invFunction i) sigsByName]
+          , not (null (invLines i))
+          , saysSomethingNew (invFunction i) sig (invLines i)
+          ]
+  in (good, length (checkAnnotationDrift cf))
+
+-- | Whether an invariant's lines introduce at least one identifier that
+-- the signature does not already contain.
+--
+-- The test is about NAMES rather than prose, because names are what a
+-- reader cannot recover from the type: the other function called, the
+-- constant used, the isolation level, the mode. "wraps runSession with
+-- TxS.transaction ReadCommitted Write" names three; "runTransaction is a
+-- function that runs the given transaction using the given connection
+-- pool" names none.
+--
+-- KNOWN FALSE POSITIVE. An invariant whose new information is carried
+-- entirely in English is flagged even though it is informative: "loads
+-- the database configuration from environment variables" for
+-- @loadDBConfig :: IO DBConfig@ adds a real fact this check cannot see.
+-- That is why it produces a warning rather than a rejection, and why the
+-- warning text asks for a specific fact rather than announcing a
+-- failure.
+saysSomethingNew :: Text -> Text -> [Text] -> Bool
+saysSomethingNew fnName sig lns =
+  let known = Set.insert (T.toLower fnName)
+                (Set.map T.toLower (identifiersIn sig))
+      said  = Set.map T.toLower (Set.unions (map identifiersIn lns))
+  in not (Set.null (Set.difference said known))
+
+-- | Whether a sentence asserts that something is missing or ought to
+-- exist. Matched against real open issues from chase's own bundle (which
+-- describe hazards in code that exists, and do not trip this) and
+-- against the fabricated ones a 7B produced (which all do).
+claimsAbsence :: Text -> Bool
+claimsAbsence t =
+  let l = T.toLower t
+  in any (`T.isInfixOf` l)
+       [ "not implemented", "is not provided", "are not provided"
+       , "is missing", "are missing", "does not exist", "do not exist"
+       , "needs to be implemented", "should be implemented"
+       , "is not defined", "are not defined", "no implementation"
+       , "should read", "should correctly", "should properly"
+       , "should execute", "should convert", "should set up"
+       , "should acquire", "should release"
+       ]
+
+-- | Identifier-shaped tokens: anything with a dot, an inner capital, a
+-- leading capital, a digit or an underscore. Ordinary lower-case English
+-- words are excluded, which is the point: they are what a restatement is
+-- made of. Two characters is enough only when a digit and a letter are
+-- both present, so "v2" counts and "is" does not.
+identifiersIn :: Text -> Set Text
+identifiersIn t =
+  Set.fromList
+    [ w
+    | raw <- T.split (\c -> not (isAlphaNum c || c `elem` ("._'" :: String))) t
+    , let w = T.dropAround (`elem` (".,;:!?'" :: String)) raw
+    , T.length w >= 2
+    , codeLike w
+    ]
+  where
+    codeLike w
+      | T.length w == 2 = T.any isDigit w && T.any isAlpha w
+    codeLike w =
+      T.any (== '.') (T.drop 1 (T.init w))
+        || T.any isUpper (T.drop 1 w)
+        || (T.any isUpper (T.take 1 w) && T.any isAlpha w)
+        || T.any isDigit w
+        || T.any (== '_') w
 
 mkOutputPath :: FilePath -> [FilePath] -> FilePath -> FilePath
 mkOutputPath outDir roots src =

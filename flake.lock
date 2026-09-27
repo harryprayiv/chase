@@ -174,21 +174,20 @@
     "grace": {
       "inputs": {
         "garnix-lib": "garnix-lib",
-        "nixpkgs": "nixpkgs_2",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1781381208,
-        "narHash": "sha256-nx1xrluibbtNmJb/LoKVW2xoGJAsXOOyg0j+beUTCa8=",
-        "owner": "Gabriella439",
-        "repo": "grace",
-        "rev": "a70b1ef6187adaf1d74caa35ab6e0a232ed6818d",
-        "type": "github"
+        "lastModified": 1790132500,
+        "narHash": "sha256-rSBqSaCRb9l+hvL7haWRA9sy/b2xW2PNY+GGiH1bYm4=",
+        "path": "/home/bismuth/git/grace",
+        "type": "path"
       },
       "original": {
-        "owner": "Gabriella439",
-        "repo": "grace",
-        "type": "github"
+        "path": "/home/bismuth/git/grace",
+        "type": "path"
       }
     },
     "hackage": {
@@ -512,7 +511,7 @@
     "nix": {
       "inputs": {
         "lowdown-src": "lowdown-src",
-        "nixpkgs": "nixpkgs_4",
+        "nixpkgs": "nixpkgs_3",
         "nixpkgs-regression": "nixpkgs-regression"
       },
       "locked": {
@@ -708,22 +707,6 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1731603435,
-        "narHash": "sha256-CqCX4JG7UiHvkrBTpYC3wcEurvbtTADLbo3Ns2CEoL8=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "8b27c1239e5c421a2bbc2c65d52e4a6fbf2ff296",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "24.11",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "nixpkgs_3": {
-      "locked": {
         "lastModified": 1751274312,
         "narHash": "sha256-/bVBlRpECLVzjV19t5KMdMFWSwKLtb5RyXdjz3LJT+g=",
         "owner": "NixOS",
@@ -738,7 +721,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_4": {
+    "nixpkgs_3": {
       "locked": {
         "lastModified": 1657693803,
         "narHash": "sha256-G++2CJ9u0E7NNTAi9n5G8TdDmGJXcIjkJ3NF8cetQB8=",
@@ -792,7 +775,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "grace": "grace",
-        "nixpkgs": "nixpkgs_3",
+        "nixpkgs": "nixpkgs_2",
         "purescript-src": "purescript-src",
         "unison-nix": "unison-nix"
       }

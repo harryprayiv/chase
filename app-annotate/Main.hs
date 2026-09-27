@@ -2,6 +2,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 
+-- | Drive the grace annotation generator over one source file.
+--
+-- The API key is NEVER a command-line argument. An argv value is visible
+-- in ps output, in shell history, and in the journal line of any systemd
+-- unit that runs this program; all three were observed while testing
+-- against a local gateway. Grace models the key as an opaque 'Key' whose
+-- Show and ToJSON instances hide it, and taking it from argv defeats that
+-- before Grace ever sees it.
+--
+-- So the key comes from, in order: --key-file, then $OPENAI_API_KEY_FILE,
+-- then $OPENAI_API_KEY. A file is preferred to an environment variable
+-- because /proc/<pid>/environ is readable by the same user and a
+-- systemd unit's environment shows up in `systemctl show`.
+--
+-- The endpoint is Grace's business: set OPENAI_BASE_URL to point at a
+-- local gateway or any other OpenAI-compatible server. This program does
+-- not know an address.
+--
+-- The generator is handed BOTH the rendered skeleton and the raw source.
+-- The skeleton has no function bodies, so signatures alone cannot support
+-- a behavioural claim; the source is where the behaviour is.
 module Main (main) where
 
 import qualified Data.Aeson           as A
@@ -9,8 +30,11 @@ import qualified Data.Aeson.Key       as Key
 import qualified Data.Aeson.KeyMap    as KM
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Text            (Text)
+import qualified Data.Text            as T
 import qualified Data.Text.IO         as TIO
 import           Options.Applicative
+import           System.Directory     (doesFileExist)
+import           System.Environment   (lookupEnv)
 import           System.Exit          (exitFailure)
 import           System.IO            (hPutStrLn, stderr)
 
@@ -22,7 +46,7 @@ import           Grace.Decode         (Key (..))
 
 data Opts = Opts
   { optSource     :: FilePath
-  , optKey        :: Text
+  , optKeyFile    :: Maybe FilePath
   , optTemplate   :: FilePath
   , optOutput     :: FilePath
   , optMaxRetries :: Int
@@ -34,10 +58,12 @@ opts = Opts
         ( metavar "SOURCE"
        <> help "Single source file to annotate (.hs or .purs)"
         )
-  <*> strOption
-        ( long "key"
-       <> metavar "KEY"
-       <> help "OpenAI API key"
+  <*> optional
+        ( strOption
+            ( long "key-file"
+           <> metavar "FILE"
+           <> help "File holding the API key. Defaults to $OPENAI_API_KEY_FILE, then $OPENAI_API_KEY. Never pass a key as an argument."
+            )
         )
   <*> strOption
         ( long "template"
@@ -62,9 +88,43 @@ opts = Opts
        <> help "Drift feedback retry budget"
         )
 
+-- | The key, from a file if one is named, else from the environment.
+-- Fails with a message naming every place it looked, because a missing
+-- key is the most common first-run failure and a bare 401 from the far
+-- end explains nothing.
+resolveKey :: Maybe FilePath -> IO Text
+resolveKey explicit = do
+  envFile <- lookupEnv "OPENAI_API_KEY_FILE"
+  envKey  <- lookupEnv "OPENAI_API_KEY"
+  case (explicit, envFile, envKey) of
+    (Just p,  _,       _)      -> fromFile p
+    (Nothing, Just p,  _)      -> fromFile p
+    (Nothing, Nothing, Just k)
+      | not (null k) -> pure (T.strip (T.pack k))
+    _ -> do
+      hPutStrLn stderr
+        "no API key: pass --key-file FILE, or set OPENAI_API_KEY_FILE, or set OPENAI_API_KEY"
+      exitFailure
+  where
+    fromFile p = do
+      ok <- doesFileExist p
+      if not ok
+        then do
+          hPutStrLn stderr ("no such key file: " <> p)
+          exitFailure
+        else do
+          t <- T.strip <$> TIO.readFile p
+          if T.null t
+            then do
+              hPutStrLn stderr ("the key file is empty: " <> p)
+              exitFailure
+            else pure t
+
 main :: IO ()
 main = do
   Opts{..} <- execParser (info (helper <*> opts) fullDesc)
+
+  key <- resolveKey optKeyFile
 
   result <- Parse.parseSourceFile optSource
   case result of
@@ -77,10 +137,15 @@ main = do
       let bundle  = Render.renderChaseFile chaseFile
       let modName = CT.chaseModuleName chaseFile
 
+      -- The bundle omits function bodies on purpose. The generator is
+      -- asked for behavioural facts, which live in the bodies, so it
+      -- gets the source too.
+      src <- TIO.readFile optSource
+
       gen <- GB.loadGenerator optTemplate
 
       (gen', drift) <- GB.generateWithDriftFeedback
-                         gen optMaxRetries chaseFile (Key optKey) bundle
+                         gen optMaxRetries chaseFile (Key key) bundle src
 
       let modAnn   = GB.toModuleAnnotations modName gen'
       let jsonOut  = annotationsToJSON modName modAnn

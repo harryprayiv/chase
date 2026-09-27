@@ -11,6 +11,23 @@
 -- Haskell function via Grace's FromGrace (a -> IO b) instance. The grace
 -- file is the prompt template, externalized and version controlled.
 -- This module never invokes the OpenAI client directly; grace does.
+--
+-- ============================================================================
+-- THE GENERATOR GETS THE SOURCE AS WELL AS THE SKELETON
+-- ============================================================================
+--
+-- GenArgs carries `source` since 2026-09-26. Before that the generator
+-- saw only the bundle, and a bundle has no function bodies by design.
+-- Asking a model for behavioural facts from signatures alone is asking
+-- for something the input does not contain, and a local 7B answered the
+-- only way it could: by restating the type, nine times out of nine, twice
+-- through a retry loop that told it not to.
+--
+-- The skeleton stays because it carries what the source does not: every
+-- signature in one place, the imports collapsed, the invariants already
+-- recorded for neighbouring functions, and the module's decisions. The
+-- source carries what the skeleton drops: what each function actually
+-- does.
 module Chase.GraceBridge
   ( GenArgs (..)
   , GenAnnotations (..)
@@ -38,6 +55,7 @@ import qualified Chase.Types    as CT
 data GenArgs = GenArgs
   { key            :: Key
   , bundle         :: Text
+  , source         :: Text
   , modName        :: Text
   , driftWarnings  :: [Text]
   } deriving stock    (Generic, Show)
@@ -86,36 +104,55 @@ loadGenerator
 loadGenerator graceTemplate =
   load (Path graceTemplate AsCode)
 
--- | Run the generator, then run chase's drift checker, then loop on
--- drift warnings up to maxRetries times. Returns the last attempt.
+-- | Run the generator, run chase's drift checker, feed the warnings back
+-- and try again, up to maxRetries times. Returns the BEST attempt and
+-- its warnings.
+--
+-- Best, not last. Measured 2026-09-26 against a local 7B on
+-- Pelotero.DB.Pool: attempt one produced ten invariants (eight of them
+-- restatements of the type, which the checker warned about); attempt two,
+-- given those warnings, deleted the invariants entirely and returned two
+-- plus eight fabricated open issues. Keeping the last attempt threw away
+-- the better one. The score is (invariants that pass every check,
+-- warnings), and more good invariants wins.
 generateWithDriftFeedback
   :: MonadIO m
   => (GenArgs -> IO GenAnnotations)
   -> Int             -- ^ maxRetries
   -> CT.ChaseFile    -- ^ the parsed file these annotations attach to
-  -> Key             -- ^ OpenAI key
+  -> Key             -- ^ API key, opaque to this module
   -> Text            -- ^ bundle text (chase output for this module)
+  -> Text            -- ^ the module's source, which the bundle omits
   -> m (GenAnnotations, [Text])
-generateWithDriftFeedback gen maxRetries chaseFile k bundle =
-  liftIO (loop 0 [])
+generateWithDriftFeedback gen maxRetries chaseFile k bundle src =
+  liftIO (loop 0 [] Nothing)
   where
     modName = CT.chaseModuleName chaseFile
 
-    loop attempt warnings
-      | attempt >= maxRetries = do
-          result <- gen (GenArgs k bundle modName warnings)
-          let modAnn = toModuleAnnotations modName result
-          let fresh  = Pipeline.checkAnnotationDrift
-                         (mergeForCheck chaseFile modAnn)
-          pure (result, fresh)
-      | otherwise = do
-          result <- gen (GenArgs k bundle modName warnings)
-          let modAnn = toModuleAnnotations modName result
-          let fresh  = Pipeline.checkAnnotationDrift
-                         (mergeForCheck chaseFile modAnn)
-          if null fresh
-            then pure (result, [])
-            else loop (attempt + 1) fresh
+    attemptOf result =
+      let modAnn = toModuleAnnotations modName result
+          merged = mergeForCheck chaseFile modAnn
+      in (result, Pipeline.checkAnnotationDrift merged, Pipeline.annotationScore merged)
+
+    better (_, _, (g1, w1)) (_, _, (g2, w2)) =
+      g1 > g2 || (g1 == g2 && w1 < w2)
+
+    keepBest new Nothing = new
+    keepBest new (Just old) = if better new old then new else old
+
+    finish (result, warnings, _) = pure (result, warnings)
+
+    loop attempt warnings best = do
+      result <- gen (GenArgs k bundle src modName warnings)
+      let this = attemptOf result
+          (_, fresh, _) = this
+          bestSoFar = keepBest this best
+      if null fresh
+        then finish this
+        else
+          if attempt >= maxRetries
+            then finish bestSoFar
+            else loop (attempt + 1) fresh (Just bestSoFar)
 
 -- | Convert the grace-shaped result into chase's existing types.
 toModuleAnnotations :: Text -> GenAnnotations -> CT.ModuleAnnotations
