@@ -6,8 +6,13 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
+    # grace = {
+    #   url = "github:Gabriella439/grace";
+    # };
+
     grace = {
-      url = "github:Gabriella439/grace";
+      url = "path:/home/bismuth/git/grace";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
 
     purescript-src = {
