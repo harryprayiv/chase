@@ -1,28 +1,37 @@
-# Generate annotations for one module, from its chase skeleton AND its
-# source.
+# Generate annotations for one module, from its chase skeleton, its
+# source, and its callers.
 #
 # Invoked from Haskell as a typed function. The schema below drives
 # structured output via Grace's toJSONSchema; the model cannot return
 # malformed shapes.
 #
-# Two changes after measuring a local 7B on Pelotero.DB.Pool, 2026-09-26.
+# Three changes after measuring a local 7B on Pelotero.DB.Pool.
 #
-# The source is now in the prompt. The skeleton has no function bodies,
-# so a model asked for behavioural facts from signatures alone has
-# nothing to draw on and restates the type: nine invariants of the form
-# "acquire creates a connection pool using the provided DBConfig", twice
-# through a retry loop that told it not to.
+# The SOURCE is in the prompt (2026-09-26). The skeleton has no function
+# bodies, so a model asked for behavioural facts from signatures alone
+# has nothing to draw on and restates the type: nine invariants of the
+# form "acquire creates a connection pool using the provided DBConfig",
+# twice through a retry loop that told it not to. With bodies in front of
+# it, the same model produced "calls 'runSession' with 'pool' and
+# 'TxS.transaction TxS.ReadCommitted TxS.Write tx'".
 #
-# The examples below are real invariants from chase's own bundle. Two
-# retries with an instruction did not move the register; showing what a
-# good invariant looks like is the thing left to try. They are chosen to
-# make the contrast explicit rather than to be imitated literally.
+# The CALLERS are in the prompt, derived from a project-wide reference
+# scan rather than guessed. Asked to produce this field, the model
+# returned module names (Hasql.Pool, System.Environment), because the
+# %uses lines were the only names it had.
+#
+# The model no longer emits consumes at all. It is computed.
+#
+# The examples below are real invariants from chase's own bundle, kept
+# because they make the contrast between a fact and a restatement
+# explicit.
 
 \arguments ->
 
 let key = arguments.key
 let bundle = arguments.bundle
 let source = arguments.source
+let callers = arguments.callers
 let modName = arguments.modName
 let driftWarnings = arguments.driftWarnings
 
@@ -78,17 +87,26 @@ in  prompt
             ! runSession executes a session within the provided connection pool
             ! renderDBError converts a DBError into a readable text message
 
-          Here is the module's structural skeleton. It gives you every
-          signature in the file, the imports, the data declarations, and
-          the invariants already recorded for neighbouring functions:
+          Here is the module's structural skeleton: every signature in the
+          file, the imports, the data declarations, and the invariants
+          already recorded for neighbouring functions.
 
           ${bundle}
 
           Here is the module's SOURCE, including the function bodies the
           skeleton omits. This is where the facts are. Read the body of a
-          function before writing anything about it:
+          function before writing anything about it.
 
           ${source}
+
+          Here is who CALLS each function in this module, derived by
+          scanning every file in the project. This is fact, not guess. Use
+          it: a function called from one place in the same module is an
+          internal helper, one called from several modules is an
+          interface, and one with no callers is either an entry point or
+          dead.
+
+          ${callers}
 
           For each top-level signature, emit at most one invariant whose
           'function' field exactly matches the signature name.
@@ -103,10 +121,6 @@ in  prompt
           If the body gives you nothing beyond the type, emit no
           invariant for that function. An absent annotation is honest; a
           vacuous one is noise.
-
-          'consumes' lists functions ELSEWHERE that call this one, if the
-          source shows them. It is not a list of imports and not a list of
-          modules. When you do not know, leave it empty.
 
           Emit a decision only when the source contains a COMMENT that
           gives a reason for a choice. Quote that reason. If no comment
@@ -127,7 +141,6 @@ in  prompt
       : { invariants:
             List { function: Text
                  , body: List Text
-                 , consumes: List Text
                  }
         , decisions:
             List { name: Text

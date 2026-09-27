@@ -11,7 +11,7 @@
     # };
 
     grace = {
-      url = "path:/home/bismuth/git/grace";
+      url = "github:harryprayiv/grace";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 

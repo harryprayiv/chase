@@ -180,14 +180,17 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1790132500,
-        "narHash": "sha256-rSBqSaCRb9l+hvL7haWRA9sy/b2xW2PNY+GGiH1bYm4=",
-        "path": "/home/bismuth/git/grace",
-        "type": "path"
+        "lastModified": 1790537297,
+        "narHash": "sha256-HuXf87HNSxy4eJyykTNR+orafo1YP4yGkf641juE4W0=",
+        "owner": "harryprayiv",
+        "repo": "grace",
+        "rev": "9cc1a0511ceb37f27647ff185268fe7b275dc37f",
+        "type": "github"
       },
       "original": {
-        "path": "/home/bismuth/git/grace",
-        "type": "path"
+        "owner": "harryprayiv",
+        "repo": "grace",
+        "type": "github"
       }
     },
     "hackage": {
@@ -872,11 +875,11 @@
         "unison": "unison"
       },
       "locked": {
-        "lastModified": 1770661811,
-        "narHash": "sha256-YWd1clM9A4kkkFvVSzVBIfGf09sZzNqbbt9hDqx+izs=",
+        "lastModified": 1782382686,
+        "narHash": "sha256-Jq3oFj3qxd9YpOBAUs48ZPpr4DBc6KEto20QdFO8Nxs=",
         "owner": "ceedubs",
         "repo": "unison-nix",
-        "rev": "451afabefe1fbd36f081c641cd112db1fcbcb622",
+        "rev": "f5ebed834bfe7d545a644f1485f573ed10575417",
         "type": "github"
       },
       "original": {

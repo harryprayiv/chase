@@ -19,10 +19,6 @@
 -- The endpoint is Grace's business: set OPENAI_BASE_URL to point at a
 -- local gateway or any other OpenAI-compatible server. This program does
 -- not know an address.
---
--- The generator is handed BOTH the rendered skeleton and the raw source.
--- The skeleton has no function bodies, so signatures alone cannot support
--- a behavioural claim; the source is where the behaviour is.
 module Main (main) where
 
 import qualified Data.Aeson           as A
@@ -38,6 +34,7 @@ import           System.Environment   (lookupEnv)
 import           System.Exit          (exitFailure)
 import           System.IO            (hPutStrLn, stderr)
 
+import qualified Chase.Callers        as Callers
 import qualified Chase.GraceBridge    as GB
 import qualified Chase.Parse          as Parse
 import qualified Chase.Render         as Render
@@ -50,6 +47,8 @@ data Opts = Opts
   , optTemplate   :: FilePath
   , optOutput     :: FilePath
   , optMaxRetries :: Int
+  , optRoots      :: [FilePath]
+  , optVerbose    :: Bool
   }
 
 opts :: Parser Opts
@@ -86,6 +85,18 @@ opts = Opts
        <> value 2
        <> showDefault
        <> help "Drift feedback retry budget"
+        )
+  <*> many
+        ( strOption
+            ( long "roots"
+           <> metavar "DIR"
+           <> help "Directories to scan for callers. Repeatable. Defaults to the hs-source-dirs of the library and executable stanzas in the nearest .cabal file above SOURCE."
+            )
+        )
+  <*> switch
+        ( long "verbose"
+       <> short 'v'
+       <> help "List every file the caller scan could not parse"
         )
 
 -- | The key, from a file if one is named, else from the environment.
@@ -138,16 +149,29 @@ main = do
       let modName = CT.chaseModuleName chaseFile
 
       -- The bundle omits function bodies on purpose. The generator is
-      -- asked for behavioural facts, which live in the bodies, so it
-      -- gets the source too.
+      -- asked for behavioural facts, which live in the bodies.
       src <- TIO.readFile optSource
+
+      -- The call graph is read from the project's own declared source
+      -- directories. Explicit --roots override that and are used as given.
+      plan <- case optRoots of
+        [] -> Callers.planScan optSource
+        rs -> pure Callers.ScanPlan { Callers.spRoots = rs, Callers.spSource = "--roots as given" }
+
+      callerIdx <- Callers.buildCallerIndex optVerbose plan
+
+      let names =
+            map CT.sigName (CT.chaseSignatures chaseFile)
+              <> map CT.sigName (CT.chaseForeignImports chaseFile)
+          callerText = Callers.renderCallers callerIdx modName names
 
       gen <- GB.loadGenerator optTemplate
 
       (gen', drift) <- GB.generateWithDriftFeedback
-                         gen optMaxRetries chaseFile (Key key) bundle src
+                         gen optMaxRetries callerIdx chaseFile
+                         (Key key) bundle src callerText
 
-      let modAnn   = GB.toModuleAnnotations modName gen'
+      let modAnn   = GB.toModuleAnnotations callerIdx modName gen'
       let jsonOut  = annotationsToJSON modName modAnn
 
       LBS.writeFile optOutput (A.encode jsonOut)
