@@ -66,7 +66,22 @@
           inherit pkgs purescript-src;
         };
 
-        chase = hpkgs.callCabal2nix "chase" ./. { };
+        # The vendored PureScript CST is gitignored, so a flake's source never
+        # has it, and `nix build` failed without running vendor-purescript-cst
+        # in a checkout first. The tree is copied with the vendored modules put
+        # in place, and the derivation is the committed nix/chase.nix rather
+        # than callCabal2nix, so a flake that uses chase evaluates without
+        # building anything first.
+        src = pkgs.runCommand "chase-src" { } ''
+          cp -r ${./.} $out
+          chmod -R u+w $out
+          rm -rf $out/vendor
+          mkdir -p $out/vendor
+          cp -r ${vendor-purescript-cst} $out/vendor/purescript-cst
+          chmod -R u+w $out/vendor
+        '';
+
+        chase = pkgs.haskell.lib.overrideCabal (hpkgs.callPackage ./nix/chase.nix { }) (_: { inherit src; });
       in {
         packages = {
           default = chase;
