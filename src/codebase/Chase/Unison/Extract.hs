@@ -1,4 +1,3 @@
--- src-codebase/Chase/Unison/Extract.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 

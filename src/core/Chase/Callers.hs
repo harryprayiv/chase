@@ -12,15 +12,16 @@
 --
 -- Chase.Coverage parses a file, takes every top-level binding, collects the
 -- variable references in its body, and inverts the result into a map from
--- referenced name to the bindings that mention it. Run over test roots,
--- that is test coverage. Run over SOURCE directories, the same index is a
+-- each referenced definition, by module and name, to the bindings that
+-- mention it. Run over test roots, that is test coverage. Run over SOURCE
+-- directories, the same index is a
 -- call graph, and a call graph is exactly what the `consumes` field of an
 -- invariant records.
 --
--- %decision DriftCheckerScopeIsLocal says consumes entries are not
--- validated because doing so "would require parsing the consumer module
--- too", which was true of the drift checker in isolation and untrue of the
--- pipeline, which parses every module anyway.
+-- chase-annotate fills each generated invariant's consumes from this
+-- index (Chase.GraceBridge.toModuleAnnotations), so those entries come
+-- from the code rather than from the model. Hand-written consumes entries
+-- are still not checked; see %decision DriftCheckerScopeIsLocal.
 --
 -- ============================================================================
 -- WHAT GETS SCANNED: THE PROJECT'S OWN hs-source-dirs
@@ -158,9 +159,10 @@ planScan start = do
 -- and whitespace both separate entries. Test suites, benchmarks, flags and
 -- source-repository stanzas are skipped.
 --
--- Checked against chase's own .cabal: it returns the four library
--- directories and the two executable directories, and nothing from the
--- test or benchmark stanzas.
+-- Checked against chase's own .cabal: it returns the five library
+-- directories (vendor/purescript-cst, src/annotations, src/core,
+-- src/codebase, src/bridge) and the three executable directories (app,
+-- app-annotate, app-unison), and nothing from the test-suite stanza.
 sourceDirsFromCabal :: Text -> [Text]
 sourceDirsFromCabal = Data.List.nub . go False . T.lines
   where
