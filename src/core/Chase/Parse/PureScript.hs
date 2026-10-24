@@ -9,7 +9,8 @@ module Chase.Parse.PureScript
 
 import qualified Data.Text          as T
 import           Data.Text          (Text)
-import qualified Data.Text.IO       as TIO
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString    as BS
 import           Control.Exception  (catch, SomeException)
 import           Data.List          (nub)
 import qualified Data.List.NonEmpty as NE
@@ -49,7 +50,10 @@ scanTestBindings path = do
 parseCstFile
   :: FilePath -> IO (Either ParseFailure (Text, CST.Module ()))
 parseCstFile path = do
-  readResult <- (Right <$> TIO.readFile path) `catch` \e ->
+  -- Read as bytes and decoded as UTF-8, not with TIO.readFile, whose
+  -- encoding is the locale's: under the POSIX locale a module holding any
+  -- character outside ASCII failed to read (2026-10-24).
+  readResult <- (decode <$> BS.readFile path) `catch` \e ->
     pure $ Left (T.pack (show (e :: SomeException)))
   case readResult of
     Left err -> pure $ Left $ ParseFailure path ("read failed: " <> err)
@@ -63,6 +67,10 @@ parseCstFile path = do
               pure $ Left $ ParseFailure path (renderParserErrors errs)
             Right fullModule ->
               pure $ Right (src, fullModule)
+
+-- | The file's bytes as UTF-8 text, or why they are not.
+decode :: BS.ByteString -> Either Text Text
+decode = either (Left . T.pack . show) Right . TE.decodeUtf8'
 
 renderParserErrors :: NonEmpty CSTErr.ParserError -> Text
 renderParserErrors errs =

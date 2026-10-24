@@ -31,7 +31,8 @@ import           Options.Applicative
 import           System.Directory     (doesFileExist)
 import           System.Environment   (lookupEnv)
 import           System.Exit          (exitFailure)
-import           System.IO            (hPutStrLn, stderr)
+import           GHC.IO.Encoding      (setLocaleEncoding, utf8)
+import           System.IO            (hPutStrLn, hSetEncoding, stderr, stdin, stdout)
 
 import           Chase.Annotations.Json (writeModuleAnnotations)
 import qualified Chase.Callers        as Callers
@@ -133,8 +134,20 @@ resolveKey explicit = do
               exitFailure
             else pure t
 
+-- | Every file chase reads or writes is UTF-8, whatever the locale. GHC
+-- opens files and the standard handles in the locale's encoding, and under
+-- the POSIX locale that is ASCII: on 2026-10-24 ten of cheeblr's frontend
+-- modules failed with "cannot decode byte sequence" because they hold a
+-- character outside ASCII, and their annotations were reported as matching
+-- no source file. A remote command run over ssh can get that locale.
+utf8Everywhere :: IO ()
+utf8Everywhere = do
+  setLocaleEncoding utf8
+  mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
+
 main :: IO ()
 main = do
+  utf8Everywhere
   Opts{..} <- execParser (info (helper <*> opts) fullDesc)
 
   key <- resolveKey optKeyFile

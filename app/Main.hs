@@ -18,7 +18,8 @@ import           System.FilePath         ( takeDirectory
                                          , takeBaseName
                                          , (</>)
                                          )
-import           System.IO               (hPutStrLn, stderr)
+import           GHC.IO.Encoding         (setLocaleEncoding, utf8)
+import           System.IO               (hPutStrLn, hSetEncoding, stderr, stdin, stdout)
 import           System.Exit             (exitFailure)
 
 import qualified Chase.Pipeline          as Pipeline
@@ -40,7 +41,18 @@ data TestsMode       = TestsAuto | TestsExplicit [FilePath] | TestsOff
 
 
 main :: IO ()
-main = execParser parserInfo >>= run
+main = utf8Everywhere >> execParser parserInfo >>= run
+
+-- | Every file chase reads or writes is UTF-8, whatever the locale. GHC
+-- opens files and the standard handles in the locale's encoding, and under
+-- the POSIX locale that is ASCII: on 2026-10-24 ten of cheeblr's frontend
+-- modules failed with "cannot decode byte sequence" because they hold a
+-- character outside ASCII, and their annotations were reported as matching
+-- no source file. A remote command run over ssh can get that locale.
+utf8Everywhere :: IO ()
+utf8Everywhere = do
+  setLocaleEncoding utf8
+  mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
 
 parserInfo :: ParserInfo Options
 parserInfo = info (helper <*> options)
