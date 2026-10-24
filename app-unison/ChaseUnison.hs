@@ -4,6 +4,7 @@
 module Main (main) where
 
 import Chase.Annotations.Json (loadAnnotationsIfExists)
+import Chase.Inference (findProjectRoot, inferenceDirName, unisonAnnotationFileName)
 import Chase.Types (emptyAnnotations)
 import Chase.Unison.Annotate
 import Chase.Unison.Api
@@ -13,6 +14,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 
 main :: IO ()
@@ -37,8 +39,14 @@ optArg :: [String] -> Maybe T.Text
 optArg (x : _) = Just (T.pack x)
 optArg []      = Nothing
 
-defaultAnnPath :: FilePath
-defaultAnnPath = "chase-unison-annotations.json"
+-- | The annotations file when -a is not given: .inference/chase-unison-annotations.json
+-- in the project chase-unison is run from. A codebase is not a directory, so
+-- the working directory is the only place a project can be found from;
+-- run chase-unison from the project's checkout. Outside any project with a
+-- .inference directory there is no default, and the bundle has no
+-- annotations.
+defaultAnnPath :: IO (Maybe FilePath)
+defaultAnnPath = fmap (\root -> root </> inferenceDirName </> unisonAnnotationFileName) <$> findProjectRoot "."
 
 usage :: IO ()
 usage = do
@@ -48,7 +56,8 @@ usage = do
   putStrLn ""
   putStrLn "  baseUrl is scheme://host:port/token, e.g. http://127.0.0.1:5858/codebase"
   putStrLn "  -o writes the bundle to OUT.chase; otherwise it prints to stdout"
-  putStrLn "  -a points at the annotations JSON (default: ./chase-unison-annotations.json)"
+  putStrLn "  -a points at the annotations JSON (default: .inference/chase-unison-annotations.json"
+  putStrLn "     in the project this is run from)"
   putStrLn "     keyed by a single module named after <project>"
   exitFailure
 
@@ -66,8 +75,15 @@ runList url project branch ns = do
 runExtract :: String -> String -> String -> T.Text -> Maybe FilePath -> Maybe FilePath -> IO ()
 runExtract url project branch root mOut mAnn = do
   let projectT = T.pack project
-      annPath  = maybe defaultAnnPath id mAnn
-  annMap <- loadAnnotationsIfExists annPath
+  annPath <- maybe defaultAnnPath (pure . Just) mAnn
+  annMap  <- case annPath of
+    Nothing -> pure Map.empty
+    Just p  ->
+      loadAnnotationsIfExists p >>= \case
+        Right m  -> pure m
+        Left err -> do
+          hPutStrLn stderr ("chase-unison: " <> err)
+          exitFailure
   let anns = maybe (emptyAnnotations projectT) id (Map.lookup projectT annMap)
   cb <- newCodebase url projectT (T.pack branch)
   collectSkeleton cb root >>= \case

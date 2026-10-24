@@ -9,11 +9,11 @@
 #
 # src is the bare tree; the flake replaces it with the tree plus the
 # vendored PureScript CST, which is gitignored.
-{ mkDerivation, aeson, array, async, base, bytestring, containers
-, deepseq, directory, dlist, filepath, ghc-lib-parser, grace, happy
-, hashable, http-client, http-types, lib, mtl, optparse-applicative
-, parallel, protolude, scientific, serialise, syb, text, time
-, transformers, utf8-string, vector
+{ mkDerivation, aeson, aeson-pretty, array, async, base, bytestring
+, containers, deepseq, directory, dlist, filepath, ghc-lib-parser
+, grace, happy, hashable, http-client, http-types, lib, mtl
+, optparse-applicative, parallel, protolude, scientific, serialise
+, syb, text, transformers, utf8-string, vector
 }:
 mkDerivation {
   pname = "chase";
@@ -21,16 +21,20 @@ mkDerivation {
   src = ../.;
   isLibrary = true;
   isExecutable = true;
+  enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson array async base bytestring containers deepseq directory dlist
-    filepath ghc-lib-parser grace hashable http-client http-types mtl
-    parallel protolude scientific serialise syb text time transformers
-    utf8-string vector
+    aeson aeson-pretty array async base bytestring containers deepseq
+    directory dlist filepath ghc-lib-parser grace hashable http-client
+    http-types mtl parallel protolude scientific serialise syb text
+    transformers utf8-string vector
   ];
   libraryToolDepends = [ happy ];
   executableHaskellDepends = [
     aeson base bytestring containers directory filepath grace
     optparse-applicative text
+  ];
+  testHaskellDepends = [
+    base bytestring containers directory filepath text
   ];
   description = "Compress Haskell + PureScript source into LLM context skeletons";
   license = lib.meta.getLicenseFromSpdxId "AGPL-3.0-or-later";

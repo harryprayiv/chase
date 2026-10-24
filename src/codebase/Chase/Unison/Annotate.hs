@@ -19,7 +19,8 @@ data AnnotatedResult = AnnotatedResult
   }
 
 -- | Render a Unison skeleton in the chase format with annotations merged in.
--- Invariants attach to entries by best (least-qualified) name; decisions and
+-- Invariants attach to an entry by any of its names, so one written against
+-- an alias is shown under the definition it names; decisions and
 -- open issues render as trailing blocks. An empty ModuleAnnotations yields
 -- structure-only output, which is exactly what you hand to an LLM to draft
 -- annotations from.
@@ -57,7 +58,7 @@ renderAnnotated usk anns = AnnotatedResult rendered drift
       , ""
       ]
 
-    renderEntry e = body ++ invLinesFor best ++ akaLines ++ [""]
+    renderEntry e = body ++ concatMap invLinesFor (seNames e) ++ akaLines ++ [""]
       where
         best = bestName (seNames e)
         sh   = "~" <> T.take 10 (T.dropWhile (== '#') (seHash e))
@@ -81,6 +82,12 @@ renderAnnotated usk anns = AnnotatedResult rendered drift
           ++ maybe [] (\h -> ["  body: " <> h]) (invBodyHint i)
 
     drift =
+      [ "constant " <> constName k <> " is not shown: chase-unison renders invariants, decisions and open issues only"
+      | k <- annConstants anns ]
+      ++
+      [ "topology " <> topName t <> " is not shown: chase-unison renders invariants, decisions and open issues only"
+      | t <- annTopologies anns ]
+      ++
       [ "invariant references unknown definition: " <> invFunction i
       | i <- annInvariants anns, not (Set.member (invFunction i) nameSet) ]
       ++

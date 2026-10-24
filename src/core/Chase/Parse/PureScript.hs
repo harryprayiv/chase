@@ -23,6 +23,7 @@ import qualified Chase.Vendor.PureScript.CST.Errors as CSTErr
 import qualified Chase.Vendor.PureScript.Names      as N
 
 import           Chase.Types
+import           Chase.Parse.Imports (ImportInfo (..), ImportNames (..), Ref (..))
 
 
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
@@ -32,15 +33,17 @@ parseSourceFile path = do
     Left pf        -> Left pf
     Right (src, m) -> Right (extractStructure path src m)
 
+-- | A file's module name, its imports and its value bindings with the
+-- references inside each, for "Chase.Coverage".
 scanTestBindings
   :: FilePath
-  -> IO (Either ParseFailure (Text, [(Text, Int, [Text])]))
+  -> IO (Either ParseFailure (Text, [ImportInfo], [(Text, Int, [Ref])]))
 scanTestBindings path = do
   result <- parseCstFile path
   pure $ case result of
     Left pf -> Left pf
     Right (_, m) ->
-      Right (moduleName m, extractTestBindings m)
+      Right (moduleName m, map importInfo (CST.modImports m), extractTestBindings m)
 
 
 parseCstFile
@@ -88,19 +91,42 @@ extractStructure path src cstModule =
        }
 
 
-extractTestBindings :: CST.Module () -> [(Text, Int, [Text])]
+extractTestBindings :: CST.Module () -> [(Text, Int, [Ref])]
 extractTestBindings cstModule =
   mapMaybe valueBindingRefs (CST.modDecls cstModule)
 
-valueBindingRefs :: CST.Declaration () -> Maybe (Text, Int, [Text])
+valueBindingRefs :: CST.Declaration () -> Maybe (Text, Int, [Ref])
 valueBindingRefs = \case
   CST.DeclValue _ vbf ->
     let fnName = identText (CST.nameValue (CST.valName vbf))
         line   = tokenLine (CST.nameTok (CST.valName vbf))
         refs   = nub (collectValueBindingRefs vbf)
-    in Just (fnName, line, filter (/= fnName) refs)
+    in Just (fnName, line, filter (/= Ref Nothing fnName) refs)
   _ -> Nothing
 
+
+-- | One import for reference resolution. In PureScript an import with
+-- @as@ brings its names in qualified only.
+importInfo :: CST.ImportDecl () -> ImportInfo
+importInfo idecl = ImportInfo
+  { impModule        = N.runModuleName (CST.nameValue (CST.impModule idecl))
+  , impAlias         = N.runModuleName . CST.nameValue . snd <$> CST.impQual idecl
+  , impQualifiedOnly = case CST.impQual idecl of
+      Just _  -> True
+      Nothing -> False
+  , impNames         = case CST.impNames idecl of
+      Nothing -> ImportAll
+      Just (hiding, names) ->
+        let listed = concatMap importedNames (delimitedNonEmptyToList names)
+        in case hiding of
+             Just _  -> ImportHiding listed
+             Nothing -> ImportOnly listed
+  }
+  where
+    importedNames = \case
+      CST.ImportValue _ (CST.Name _ ident) -> [identText ident]
+      CST.ImportOp _ (CST.Name _ op)       -> [N.runOpName op]
+      _                                    -> []
 
 extractImport :: CST.ImportDecl () -> Text
 extractImport idecl =
@@ -193,38 +219,39 @@ extractFixity lns (decl, startL, _) = case decl of
   _ -> Nothing
 
 
-collectValueBindingRefs :: CST.ValueBindingFields () -> [Text]
+collectValueBindingRefs :: CST.ValueBindingFields () -> [Ref]
 collectValueBindingRefs vbf =
   case CST.valGuarded vbf of
     CST.Unconditional _ wheree -> collectFromWhere wheree
     CST.Guarded gexprs         -> concatMap collectFromGuardedExpr (NE.toList gexprs)
 
-collectFromWhere :: CST.Where () -> [Text]
+collectFromWhere :: CST.Where () -> [Ref]
 collectFromWhere (CST.Where expr mBindings) =
   collectFromExpr expr <>
   case mBindings of
     Nothing -> []
     Just (_, bs) -> concatMap collectFromLetBinding (NE.toList bs)
 
-collectFromGuardedExpr :: CST.GuardedExpr () -> [Text]
+collectFromGuardedExpr :: CST.GuardedExpr () -> [Ref]
 collectFromGuardedExpr (CST.GuardedExpr _ pats _ wheree) =
   concatMap collectFromPatternGuard (sepToList pats)
   <> collectFromWhere wheree
 
-collectFromPatternGuard :: CST.PatternGuard () -> [Text]
+collectFromPatternGuard :: CST.PatternGuard () -> [Ref]
 collectFromPatternGuard (CST.PatternGuard _ expr) = collectFromExpr expr
 
-collectFromLetBinding :: CST.LetBinding () -> [Text]
+collectFromLetBinding :: CST.LetBinding () -> [Ref]
 collectFromLetBinding = \case
   CST.LetBindingSignature _ _ -> []
   CST.LetBindingName _ vbf    -> collectValueBindingRefs vbf
   CST.LetBindingPattern _ _ _ w -> collectFromWhere w
 
-collectFromExpr :: CST.Expr () -> [Text]
+collectFromExpr :: CST.Expr () -> [Ref]
 collectFromExpr = \case
   CST.ExprHole _ _                      -> []
   CST.ExprSection _ _                   -> []
-  CST.ExprIdent _ qn                    -> [identText (CST.qualName qn)]
+  CST.ExprIdent _ qn                    ->
+    [Ref (N.runModuleName <$> CST.qualModule qn) (identText (CST.qualName qn))]
   CST.ExprConstructor _ _               -> []
   CST.ExprBoolean _ _ _                 -> []
   CST.ExprChar _ _ _                    -> []
@@ -262,23 +289,23 @@ collectFromExpr = \case
     concatMap collectFromDoStatement (CST.adoStatements block)
     <> collectFromExpr (CST.adoResult block)
 
-collectFromRecordLabeled :: CST.RecordLabeled (CST.Expr ()) -> [Text]
+collectFromRecordLabeled :: CST.RecordLabeled (CST.Expr ()) -> [Ref]
 collectFromRecordLabeled = \case
-  CST.RecordPun (CST.Name _ ident) -> [identText ident]
+  CST.RecordPun (CST.Name _ ident) -> [Ref Nothing (identText ident)]
   CST.RecordField _ _ e            -> collectFromExpr e
 
-collectFromRecordUpdate :: CST.RecordUpdate () -> [Text]
+collectFromRecordUpdate :: CST.RecordUpdate () -> [Ref]
 collectFromRecordUpdate = \case
   CST.RecordUpdateLeaf _ _ e         -> collectFromExpr e
   CST.RecordUpdateBranch _ updates   ->
     concatMap collectFromRecordUpdate (delimitedNonEmptyToList updates)
 
-collectFromGuarded :: CST.Guarded () -> [Text]
+collectFromGuarded :: CST.Guarded () -> [Ref]
 collectFromGuarded = \case
   CST.Unconditional _ wheree -> collectFromWhere wheree
   CST.Guarded gexprs         -> concatMap collectFromGuardedExpr (NE.toList gexprs)
 
-collectFromDoStatement :: CST.DoStatement () -> [Text]
+collectFromDoStatement :: CST.DoStatement () -> [Ref]
 collectFromDoStatement = \case
   CST.DoLet _ bindings -> concatMap collectFromLetBinding (NE.toList bindings)
   CST.DoDiscard e      -> collectFromExpr e

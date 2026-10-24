@@ -39,6 +39,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import Network.HTTP.Client
 import Network.HTTP.Types.Status (statusCode)
+import Network.HTTP.Types.URI (urlEncode)
 
 
 data Codebase = Codebase
@@ -57,11 +58,17 @@ newCodebase baseUrl project branch = do
       ('/' : rest) -> reverse rest
       _            -> s
 
+-- | A project or branch name as one URL path segment. A contributor branch
+-- such as @harry/feature has a '/' that would otherwise split the path,
+-- and the request would go to a route that does not exist.
+segment :: Text -> String
+segment = T.unpack . TE.decodeUtf8 . urlEncode False . TE.encodeUtf8
+
 apiGet :: FromJSON a => Codebase -> String -> [(ByteString, Maybe Text)] -> IO (Either Text a)
 apiGet cb endpoint params = do
   let url = cbBaseUrl cb
-          <> "/api/projects/" <> T.unpack (cbProject cb)
-          <> "/branches/"     <> T.unpack (cbBranch cb)
+          <> "/api/projects/" <> segment (cbProject cb)
+          <> "/branches/"     <> segment (cbBranch cb)
           <> "/"              <> endpoint
   reqE <- try (parseRequest url) :: IO (Either SomeException Request)
   case reqE of

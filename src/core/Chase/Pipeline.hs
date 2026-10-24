@@ -21,9 +21,8 @@ import qualified Data.Text.IO as TIO
 import Data.Char (isAlpha, isAlphaNum, isDigit, isUpper)
 import Control.Monad (forM, forM_, when)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.Time (getCurrentTime, defaultTimeLocale, formatTime)
 import System.Directory
-  ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory )
+  ( createDirectoryIfMissing )
 import System.FilePath
   ( (</>), (<.>), takeDirectory, takeExtension, takeFileName
   , dropExtension, makeRelative, equalFilePath
@@ -34,6 +33,7 @@ import           Chase.Types
 import           Chase.Parse
 import           Chase.Render
 import qualified Chase.Coverage as Coverage
+import           Chase.Sources (findSourceFiles)
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
@@ -57,9 +57,22 @@ defaultConfig = ChaseConfig
 runChase :: ChaseConfig -> IO ()
 runChase cfg = do
   testIdx <- buildTestIndexOrEmpty cfg
-  case cfgBundleFile cfg of
+  parsed <- case cfgBundleFile cfg of
     Nothing     -> runPerFile  cfg testIdx
     Just bundle -> runBundled  cfg bundle testIdx
+  forM_ (unmatchedAnnotations (cfgAnnotations cfg) parsed) \w ->
+    putStrLn $ "  drift: " <> T.unpack w
+
+-- | Annotated modules that no parsed file defines: renamed or deleted
+-- modules whose annotations would otherwise stay in the file and attach to
+-- nothing, without a word. A module whose file failed to parse is not
+-- listed here, since its parse failure is already reported.
+unmatchedAnnotations :: Map Text ModuleAnnotations -> Set Text -> [Text]
+unmatchedAnnotations anns parsed =
+  [ "annotations for module " <> m <> " match no source file"
+  | m <- Map.keys anns
+  , not (Set.member m parsed)
+  ]
 
 -- | Parse every .hs and .purs file under cfgTestRoots and build the
 -- global reference index. If cfgTestRoots is empty, returns an empty
@@ -90,17 +103,20 @@ buildTestIndexOrEmpty ChaseConfig{..}
         putStrLn ""
       pure idx
 
-runPerFile :: ChaseConfig -> Coverage.TestRefIndex -> IO ()
+-- | Writes one .chase per source file. Returns the modules parsed, and
+-- likewise for 'runBundled'.
+runPerFile :: ChaseConfig -> Coverage.TestRefIndex -> IO (Set Text)
 runPerFile ChaseConfig{..} testIdx = do
   createDirectoryIfMissing True cfgOutputDir
   files <- concat <$> mapM findSourceFiles cfgSourceRoots
-  forM_ files \src -> do
+  fmap (Set.fromList . concat) . forM files $ \src -> do
     when cfgVerbose $ putStrLn $ "parse  " <> src
     result <- parseSourceFile src
     case result of
       Left ParseFailure{..} -> do
         putStrLn $ "WARN: parse failed for " <> pfPath
         TIO.putStrLn $ "  " <> pfMsg
+        pure []
       Right structural -> do
         let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
             outPath  = mkOutputPath cfgOutputDir cfgSourceRoots src
@@ -111,13 +127,15 @@ runPerFile ChaseConfig{..} testIdx = do
         createDirectoryIfMissing True (takeDirectory outPath)
         TIO.writeFile outPath rendered
         when cfgVerbose $ putStrLn $ "write  " <> outPath
+        pure [chaseModuleName structural]
 
-runBundled :: ChaseConfig -> FilePath -> Coverage.TestRefIndex -> IO ()
+runBundled :: ChaseConfig -> FilePath -> Coverage.TestRefIndex -> IO (Set Text)
 runBundled ChaseConfig{..} bundlePath testIdx = do
   createDirectoryIfMissing True (takeDirectory bundlePath)
   files <- concat <$> mapM findSourceFiles cfgSourceRoots
   failuresRef  <- newIORef (0 :: Int)
   successesRef <- newIORef (0 :: Int)
+  parsedRef    <- newIORef Set.empty
   blocks       <- forM files \src -> do
     when cfgVerbose $ putStrLn $ "parse  " <> src
     result <- parseSourceFile src
@@ -129,6 +147,7 @@ runBundled ChaseConfig{..} bundlePath testIdx = do
         pure (renderFailureBlock cfgSourceRoots src pfMsg)
       Right structural -> do
         modifyIORef' successesRef (+ 1)
+        modifyIORef' parsedRef (Set.insert (chaseModuleName structural))
         let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
             rendered = renderChaseFile merged
             drift    = checkAnnotationDrift merged
@@ -138,13 +157,13 @@ runBundled ChaseConfig{..} bundlePath testIdx = do
 
   successes <- readIORef successesRef
   failures  <- readIORef failuresRef
-  preamble  <- renderPreamble cfgSourceRoots successes failures
-  let bundle = preamble <> T.concat blocks
+  let bundle = renderPreamble cfgSourceRoots successes failures <> T.concat blocks
   TIO.writeFile bundlePath bundle
   when cfgVerbose $ do
     putStrLn $ "bundled " <> show successes
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
+  readIORef parsedRef
 
 applyPasses
   :: Map Text ModuleAnnotations
@@ -158,13 +177,15 @@ applyPasses anns testRoots testIdx cf =
        then withAnn
        else Coverage.attachCoverage testIdx withAnn
 
-renderPreamble :: [FilePath] -> Int -> Int -> IO Text
-renderPreamble roots ok failed = do
-  now <- getCurrentTime
-  let stamp = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
-  pure $ T.unlines
+-- | The bundle's header. Nothing in it depends on when chase ran, so the
+-- same sources, annotations and test roots give the same bytes. A
+-- %generated timestamp stood second until 2026-10-24; it made every
+-- bundle new to open-slop's ingest, which skips a file whose content hash
+-- it has already stored, so every bundle was re-embedded on every ingest.
+renderPreamble :: [FilePath] -> Int -> Int -> Text
+renderPreamble roots ok failed =
+  T.unlines
     [ "%bundle chase v1"
-    , "%generated " <> T.pack stamp
     , "%roots " <> T.intercalate ", " (map T.pack roots)
     , "%files " <> T.pack (show ok) <> " ok, "
                 <> T.pack (show failed) <> " failed"
@@ -398,22 +419,3 @@ relativeToRoots roots src =
   in case candidates of
        (r:_) -> r
        []    -> takeFileName src
-
-findSourceFiles :: FilePath -> IO [FilePath]
-findSourceFiles root = do
-  isFile <- doesFileExist root
-  if isFile
-    then pure [ root | takeExtension root `elem` [".hs", ".purs"] ]
-    else do
-      exists <- doesDirectoryExist root
-      if not exists
-        then pure []
-        else do
-          entries <- Data.List.sort <$> listDirectory root
-          let fullPaths = map (root </>) entries
-          results <- forM fullPaths \p -> do
-            isDir <- doesDirectoryExist p
-            if isDir
-              then findSourceFiles p
-              else pure [ p | takeExtension p `elem` [".hs", ".purs"] ]
-          pure (concat results)

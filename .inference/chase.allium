@@ -1,0 +1,355 @@
+-- allium: 3
+-- chase.allium
+--
+-- Distilled from chase, branch unison (d064775, 2026-10-24): the chase,
+-- chase-annotate and chase-unison programs and their libraries.
+-- Revised 2026-10-24 after the fixes: every rule below describes what the
+-- code does now. The issues the first draft found, and what was done about
+-- each, are in "Fixed" at the bottom.
+--
+-- Scope
+--   Includes: source discovery, the structural skeleton of a Haskell or
+--             PureScript module, annotation files and how they are found,
+--             merged and checked for drift, test coverage and callers,
+--             bundles, the Unison codebase walk and its rendering,
+--             chase-annotate's retry loop and output.
+--   Excludes: ghc-lib-parser and the vendored PureScript CST themselves,
+--             Grace's prompt evaluation, the Nix packaging.
+--
+-- Probes U1..U5 are test/Probe.hs (cabal test chase-probes).
+
+----------------------------------------------------------------------
+-- External entities
+----------------------------------------------------------------------
+
+external entity SourceFile {
+    path: String
+    language: haskell | purescript
+    module_name: String
+    imports: List<Import>
+}
+
+value Import {
+    module: String
+    alias: String?
+    qualified_only: Boolean
+    names: all | only(List<String>) | hiding(List<String>)
+}
+
+external entity UnisonCodebase {
+    api_url: String
+    project: String
+    branch: String
+}
+
+----------------------------------------------------------------------
+-- Entities
+----------------------------------------------------------------------
+
+entity Project {
+    root: String
+    inference_dir: String
+    -- root/.inference, where everything for the LLM tooling lives
+    sources: SourceFile with project = this
+}
+
+entity AnnotationFile {
+    project: Project
+    path: String
+    version: Integer
+    modules: ModuleAnnotations with file = this
+}
+
+entity ModuleAnnotations {
+    file: AnnotationFile
+    module_name: String
+    constants: List<Constant>
+    invariants: Map<String, Invariant>
+    decisions: List<Decision>
+    open_issues: List<OpenIssue>
+    topologies: List<Topology>
+}
+
+value Invariant {
+    function: String
+    lines: List<String>
+    consumes: List<String>
+    hint: String?
+}
+
+value Decision { name: String, what: String, why: String, affects: List<String> }
+
+value OpenIssue { name: String, what: String, why: String, blocking: List<String>, affects: List<String> }
+
+value Constant { name: String, value: String, notes: List<String> }
+
+value Topology { name: String, vertices: List<String>, transitions: Map<String, List<String>> }
+
+value Reference {
+    qualifier: String?
+    name: String
+}
+
+entity Skeleton {
+    source: SourceFile
+    signatures: List<String>
+    foreign_imports: List<String>
+    patterns: List<String>
+    annotations: ModuleAnnotations?
+    tested_by: Map<String, List<TestRef>>?
+
+    defined_names: signatures + foreign_imports + patterns
+}
+
+value TestRef { module: String, function: String, line: Integer }
+
+entity Bundle {
+    path: String
+    roots: List<String>
+    skeletons: List<Skeleton>
+    parse_failures: List<String>
+}
+
+entity UnisonDefinition {
+    hash: String
+    names: List<String>
+    -- best (least qualified) first
+    kind: term | type
+    signature: String
+}
+
+----------------------------------------------------------------------
+-- Rules: finding and writing the annotations
+----------------------------------------------------------------------
+
+rule LocateAnnotations {
+    when: ChaseRun(source, annotations_flag)
+    let project = nearest_ancestor_with_inference_dir(source)
+    ensures: annotations_flag given => that file, or exit naming it if missing
+    ensures: --no-annotations => none
+    ensures: otherwise => project.inference_dir/chase-annotation.json or
+             project.inference_dir/chase-annotations.json, the first that
+             exists, or none
+    ensures: the working directory is never searched
+    @guidance "The walk up from SOURCE stops at the first directory holding
+               .git, so it never leaves the repository (Chase.Inference)."
+}
+
+rule LocateUnisonAnnotations {
+    when: ChaseUnisonExtract(codebase, annotations_flag)
+    ensures: annotations_flag given => that file
+    ensures: otherwise => .inference/chase-unison-annotations.json in the
+             project chase-unison is run from, or none outside a project
+    ensures: a missing file is no annotations; a file that does not parse
+             stops the run with the parse error (U2)
+}
+
+rule AnnotateModule {
+    when: AnnotateRequested(source, output, template)
+    let project = nearest_ancestor_with_inference_dir(source)
+    let target = output ?? the project's annotations file ??
+                 project.inference_dir/chase-annotations.json
+    requires: target is known; with no output and no project, the run stops
+              and says to pass -o or create .inference
+    ensures: the module's invariants, decisions and open issues in target
+             are replaced by the generated ones
+    ensures: every other module, and this module's constants and
+             topologies, are kept
+    ensures: a target that is not a version 1 annotations file is left
+             untouched and the run stops
+    ensures: the file is written to a temporary name and renamed into place
+    ensures: the attempt kept is the best by annotationScore, not the last
+    ensures: template defaults to the genAnnotations.ffg installed with
+             chase as a data file
+}
+
+----------------------------------------------------------------------
+-- Rules: skeletons and bundles
+----------------------------------------------------------------------
+
+rule DiscoverSources {
+    when: WalkRequested(root)
+    ensures: every .hs and .purs file under root, in sorted order
+    ensures: symbolic links found during the walk are not followed
+    ensures: directories whose name starts with a dot, and dist-newstyle,
+             dist, .stack-work, .spago, output and node_modules, are not
+             entered
+    ensures: the root itself is taken as given
+    @guidance "One walker (Chase.Sources) serves sources, test roots and the
+               caller scan (U4)."
+}
+
+rule AttachAnnotations {
+    when: skeleton: Skeleton.created
+    ensures: skeleton.annotations = the ModuleAnnotations whose module_name
+             is skeleton.source.module_name, if any
+}
+
+rule ReportUnmatchedAnnotations {
+    when: RunFinished(file, parsed_modules)
+    ensures: each ModuleAnnotations in file whose module_name is not among
+             the modules parsed in this run is reported as drift:
+             "annotations for module M match no source file"
+    @guidance "A run over part of a project (one hs-source-dir of several)
+               reports the modules that live in the other parts; read the
+               warning against the roots of the run."
+}
+
+rule DriftChecks {
+    when: skeleton: Skeleton.created
+    requires: skeleton.annotations != null
+    ensures: invariant, decision and open-issue names not in defined_names
+             are reported
+    ensures: an invariant that introduces no identifier beyond its
+             signature is reported as repeating the type
+    ensures: an open issue claiming something absent that the file defines
+             is reported as fabricated
+    @guidance "The emptiness check has a documented false positive for facts
+               carried in plain English."
+}
+
+rule ResolveReference {
+    when: ReferenceFound(binding, reference)
+    let file = binding.source
+    ensures: a qualified reference Q.f names every module imported as Q, or
+             under its own name Q with no alias, whose import list lets f
+             through
+    ensures: an unqualified reference f names the binding's own module and
+             every module imported unqualified whose import list lets f
+             through
+    @guidance "Haskell: import qualified is qualified-only; an import list
+               with T(..) lets every name through, since its members are not
+               known from the import alone. PureScript: every import with as
+               is qualified-only."
+}
+
+rule CoverageByReference {
+    when: skeleton: Skeleton.created
+    requires: test roots were given or found
+    ensures: tested_by[name] lists the test bindings whose references
+             resolve to (skeleton.source.module_name, name)
+    @guidance "The index is keyed by (module, name), so same-named functions
+               in different modules are told apart (U5). chase-annotate's
+               callers use the same index."
+}
+
+rule WriteBundle {
+    when: ChaseRun(sources, output ending .chase)
+    ensures: the bundle's bytes depend only on the sources, the annotations,
+             the test roots and the roots as given (U3)
+    @guidance "There is no timestamp in the preamble, so open-slop's
+               content-hash check skips a bundle whose code has not
+               changed."
+}
+
+----------------------------------------------------------------------
+-- Rules: Unison
+----------------------------------------------------------------------
+
+rule ConnectToCodebase {
+    when: ChaseUnisonRun(api_url, project, branch)
+    ensures: project and branch are percent-encoded as path segments
+}
+
+rule WalkCodebase {
+    when: ChaseUnisonExtract(codebase, root)
+    ensures: every definition under root, deduplicated by hash, with all its
+             names
+    ensures: at the branch root only, the lib namespace and namespaces named
+             like versioned dependencies (three numeric underscore parts)
+             are skipped; deeper namespaces with those names are walked
+    ensures: constructors, record satellites and folded getters are
+             dropped as redundant with their type's declaration
+    ensures: a definition that fails to resolve after retries is rendered
+             hash-only and listed in the warnings
+}
+
+rule RenderUnisonAnnotations {
+    when: UnisonBundleRendered(definitions, annotations)
+    ensures: an invariant attaches to the definition any of whose names it
+             is keyed by (U1)
+    ensures: an invariant keyed by a name no definition has is drift
+    ensures: constants and topologies, which a Unison bundle does not
+             render, are each reported as not shown
+}
+
+----------------------------------------------------------------------
+-- Invariants
+----------------------------------------------------------------------
+
+invariant AnnotationsBelongToTheirProject {
+    Skeleton.all(s => s.annotations = null or
+        s.annotations.file.project = s.source.project)
+}
+
+invariant BundleIsReproducible {
+    Bundle.all(b => bytes(b) = bytes(rebuild(b)))
+}
+
+invariant AnnotateIsNotDestructive {
+    all annotate runs r: modules(after(r)) = modules(before(r)) + r.module
+}
+
+invariant EveryAnnotationIsShownOrReported {
+    all annotations a: rendered(a) or reported_as_drift(a)
+}
+
+invariant MalformedAnnotationsAreErrors {
+    all runs r: parse_failed(r.annotations_file) implies r exits with that error
+}
+
+invariant CoverageNamesTheDefiningModule {
+    Skeleton.all(s => s.tested_by = null or
+        s.tested_by.all((name, refs) => refs.all(r =>
+            resolves(r, s.source.module_name, name))))
+}
+
+----------------------------------------------------------------------
+-- Deferred
+----------------------------------------------------------------------
+
+deferred nearest_ancestor_with_inference_dir(path)
+deferred annotationScore(skeleton)
+
+----------------------------------------------------------------------
+-- Fixed (2026-10-24)
+----------------------------------------------------------------------
+--
+-- Each issue the first draft found, and the fix. Evidence: the five
+-- probes pass, chase builds with no warnings from the changed modules, and
+-- a bundle of chase's own src/core is byte-identical across two runs.
+--
+-- Annotations were looked for in the working directory first, then the
+-- source directory and its parent; none of those is .inference.
+--   Chase.Inference finds the project from SOURCE; CWD is not searched.
+-- chase-unison read ./chase-unison-annotations.json and treated a malformed
+-- file as empty (U2).
+--   Default is the project's .inference file; a parse error stops the run.
+-- chase-annotate overwrote its output with one module, at ./ by default,
+-- and its template default existed only in chase's checkout.
+--   writeModuleAnnotations merges; output defaults to the project's
+--   .inference file; the template is a cabal data file.
+-- Discovery followed symbolic links and entered build output (U4).
+--   Chase.Sources, one walker for sources, tests and callers.
+-- Annotations for modules with no source were never reported.
+--   unmatchedAnnotations in Chase.Pipeline.
+-- Coverage and callers were keyed by bare name (U5).
+--   References carry their qualifier; Chase.Coverage resolves them through
+--   each file's imports (Chase.Parse.Imports for both languages).
+-- The %generated timestamp changed every bundle on every run (U3).
+--   Removed.
+-- Unison project and branch were not URL-encoded.
+--   Chase.Unison.Api.segment.
+-- Unison skipped lib and version-suffixed namespaces at any depth.
+--   Only at the branch root.
+-- Unison invariants on an alias were dropped (U1); constants and
+-- topologies were ignored silently.
+--   Invariants attach by any name; constants and topologies are reported.
+-- extra-source-files named chase-annotation.json at the root after it moved.
+--   .inference/chase-annotation.json.
+
+----------------------------------------------------------------------
+-- Open questions
+----------------------------------------------------------------------
+
+open question "A run over one hs-source-dir reports annotated modules that live in the project's other source dirs as matching no source file. Should the report be limited to modules whose files would fall under the run's roots, which needs a module-to-path guess, or stay as it is?"

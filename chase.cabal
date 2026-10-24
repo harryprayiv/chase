@@ -14,7 +14,8 @@ copyright:          (c) 2025 Harry Pray
 build-type:         Simple
 extra-source-files:
   README.md
-  chase-annotation.json
+  .inference/chase-annotation.json
+data-files:
   grace/genAnnotations.ffg
 
 common warnings
@@ -111,9 +112,11 @@ library vendor-purescript-cst
 -- ------------------------------------------------------------------
 -- chase-annotations sublibrary
 --
--- The shared data model (Chase.Types) plus the annotation JSON codec
--- (Chase.Annotations.Json). Deliberately thin: aeson/containers/text/
--- directory/bytestring only, no ghc-lib-parser, no grace, no network.
+-- The shared data model (Chase.Types), the annotation JSON codec
+-- (Chase.Annotations.Json) and where a project's .inference directory is
+-- (Chase.Inference). Deliberately thin: aeson/aeson-pretty/containers/
+-- text/directory/filepath/bytestring only, no ghc-lib-parser, no grace,
+-- no network.
 -- Both the deterministic chase core and the Unison client depend on it,
 -- so the annotation format is defined in exactly one place.
 -- ------------------------------------------------------------------
@@ -129,12 +132,15 @@ library chase-annotations
   exposed-modules:
     Chase.Types
     Chase.Annotations.Json
+    Chase.Inference
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
+    , aeson-pretty
     , bytestring
     , containers
     , directory
+    , filepath
     , text
 
 -- ------------------------------------------------------------------
@@ -154,12 +160,15 @@ library
     Chase.Callers
     Chase.Parse
     Chase.Parse.Haskell
+    Chase.Parse.Imports
     Chase.Parse.PureScript
     Chase.Pipeline
     Chase.Render
+    Chase.Sources
   reexported-modules:
     Chase.Types,
-    Chase.Annotations.Json
+    Chase.Annotations.Json,
+    Chase.Inference
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
@@ -171,7 +180,6 @@ library
     , ghc-lib-parser
     , syb
     , text
-    , time
     , vendor-purescript-cst
 
 -- ------------------------------------------------------------------
@@ -247,6 +255,8 @@ executable chase-annotate
   import:           warnings
   hs-source-dirs:   app-annotate
   main-is:          Main.hs
+  other-modules:    Paths_chase
+  autogen-modules:  Paths_chase
   ghc-options:      -threaded -rtsopts -with-rtsopts=-N
   build-depends:
     , base
@@ -273,4 +283,30 @@ executable chase-unison
     , chase:chase-annotations
     , chase:chase-codebase
     , containers
+    , filepath
+    , text
+
+-- ------------------------------------------------------------------
+-- chase-probes test suite
+--
+-- Probes from chase.allium (U1 to U5): the Unison renderer, the
+-- annotation loader, bundle reproducibility, source discovery and
+-- coverage resolution. Each asserts what the spec requires, so a failure
+-- is evidence for the matching issue.
+-- ------------------------------------------------------------------
+
+test-suite chase-probes
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Probe.hs
+  build-depends:
+    , base
+    , bytestring
+    , chase
+    , chase:chase-annotations
+    , chase:chase-codebase
+    , containers
+    , directory
+    , filepath
     , text

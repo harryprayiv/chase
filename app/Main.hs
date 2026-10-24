@@ -13,7 +13,6 @@ import           Data.Text               (Text)
 import           Data.List               (intercalate, isSuffixOf)
 import           System.Directory        ( doesFileExist
                                          , doesDirectoryExist
-                                         , getCurrentDirectory
                                          )
 import           System.FilePath         ( takeDirectory
                                          , takeBaseName
@@ -24,6 +23,7 @@ import           System.Exit             (exitFailure)
 
 import qualified Chase.Pipeline          as Pipeline
 import qualified Chase.Annotations.Json  as Anno
+import           Chase.Inference         (locateAnnotations)
 import           Chase.Types             (ModuleAnnotations)
 
 
@@ -79,9 +79,10 @@ options = Options
              <> short 'a'
              <> metavar "FILE"
              <> help "Annotations JSON path. \
-                     \Default: auto-detect chase-annotation.json \
-                     \or chase-annotations.json in CWD, source dir, \
-                     \or source parent."
+                     \Default: chase-annotation.json or \
+                     \chase-annotations.json in the .inference directory \
+                     \of the project SOURCE is in (the nearest directory \
+                     \above SOURCE that has one, within its repository)."
               )
           )
       <|> flag' AnnOff
@@ -144,16 +145,7 @@ resolveAnnotations _ _ (AnnFile f) = do
   if ok then pure (Just f) else do
     hPutStrLn stderr $ "chase: annotations file not found: " <> f
     exitFailure
-resolveAnnotations source isDir AnnAuto = do
-  cwd <- getCurrentDirectory
-  let sourceDir
-        | isDir     = source
-        | otherwise = takeDirectory source
-      parent     = takeDirectory sourceDir
-      dirs       = [cwd, sourceDir, parent]
-      names      = ["chase-annotation.json", "chase-annotations.json"]
-      candidates = [d </> n | d <- dirs, n <- names]
-  findFirst doesFileExist candidates
+resolveAnnotations source _ AnnAuto = locateAnnotations source
 
 
 resolveTests :: FilePath -> Bool -> TestsMode -> IO [FilePath]
@@ -194,12 +186,6 @@ loadAnnotationsOrDie quiet (Just p) = do
                 <> " (" <> show (Map.size m) <> " modules)"
       pure m
 
-
-findFirst :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
-findFirst _ []     = pure Nothing
-findFirst p (x:xs) = do
-  ok <- p x
-  if ok then pure (Just x) else findFirst p xs
 
 splitCommas :: String -> [String]
 splitCommas s = case break (== ',') s of

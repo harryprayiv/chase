@@ -44,9 +44,11 @@
 module Chase.Annotations.Json
   ( loadAnnotations
   , loadAnnotationsIfExists
+  , writeModuleAnnotations
   ) where
 
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Encode.Pretty as Pretty
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Types as AT
@@ -55,7 +57,8 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as T
 import Data.Text (Text)
-import System.Directory (doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.FilePath (takeDirectory)
 
 import Chase.Types
 
@@ -75,15 +78,67 @@ loadAnnotations path = do
           AT.Error   e -> Left  $ path <> ": " <> e
           AT.Success m -> Right m
 
--- | If the file exists and parses, return its contents.
--- If missing, return empty silently. Parse errors are also silenced
--- here -- use 'loadAnnotations' if you want to surface them.
-loadAnnotationsIfExists :: FilePath -> IO (Map Text ModuleAnnotations)
+-- | Annotations from a file that may not exist yet: no annotations when
+-- it is missing, its contents when it parses, and the parse error when it
+-- does not.
+--
+-- A missing file is a normal state (a project not annotated yet). A file
+-- that is there and does not parse is not: until 2026-10-24 this returned
+-- no annotations for it too, and chase-unison wrote a bundle without them
+-- and said nothing, so one typo in the file looked like a codebase nobody
+-- had annotated.
+loadAnnotationsIfExists :: FilePath -> IO (Either String (Map Text ModuleAnnotations))
 loadAnnotationsIfExists path = do
   exists <- doesFileExist path
   if not exists
-    then pure Map.empty
-    else either (const Map.empty) id <$> loadAnnotations path
+    then pure (Right Map.empty)
+    else loadAnnotations path
+
+-- | Write one module's annotations into an annotations file, keeping
+-- everything else in it.
+--
+-- The given fields replace the same fields of the module's entry; fields
+-- the entry has that are not given (constants and topologies, which
+-- chase-annotate does not generate) are kept, and every other module is
+-- kept as it is. A file that does not exist is created with only this
+-- module. A file that is there but is not a version 1 annotations file is
+-- refused and left untouched: overwriting it would lose what it holds.
+--
+-- The file is written beside itself and renamed into place, so a failure
+-- part way leaves the old file whole. It is written indented, as the
+-- hand-kept files are; keys come out in sorted order.
+writeModuleAnnotations :: FilePath -> Text -> A.Object -> IO (Either String ())
+writeModuleAnnotations path modName fields = do
+  exists <- doesFileExist path
+  existing <-
+    if not exists
+      then pure (Right KM.empty)
+      else do
+        bs <- LBS.readFile path
+        pure $ case A.eitherDecode bs of
+          Left e -> Left (path <> ": " <> e <> "; not overwritten")
+          Right (A.Object root) -> case (KM.lookup "version" root, KM.lookup "modules" root) of
+            (v, Just (A.Object mods))
+              | maybe True (== A.Number 1) v -> Right mods
+            _ -> Left (path <> ": not a version 1 annotations file with a modules object; not overwritten")
+          Right _ -> Left (path <> ": not a JSON object; not overwritten")
+  case existing of
+    Left e -> pure (Left e)
+    Right mods -> do
+      let key = Key.fromText modName
+          old = case KM.lookup key mods of
+            Just (A.Object o) -> o
+            _                 -> KM.empty
+          merged = KM.union fields old
+          root = KM.fromList
+            [ ("version", A.Number 1)
+            , ("modules", A.Object (KM.insert key (A.Object merged) mods))
+            ]
+          tmp = path <> ".partial"
+      createDirectoryIfMissing True (takeDirectory path)
+      LBS.writeFile tmp (Pretty.encodePretty' Pretty.defConfig {Pretty.confIndent = Pretty.Spaces 2, Pretty.confCompare = compare} (A.Object root) <> "\n")
+      renameFile tmp path
+      pure (Right ())
 
 -- top level ------------------------------------------------------------
 

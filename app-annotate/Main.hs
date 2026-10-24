@@ -24,7 +24,6 @@ module Main (main) where
 import qualified Data.Aeson           as A
 import qualified Data.Aeson.Key       as Key
 import qualified Data.Aeson.KeyMap    as KM
-import qualified Data.ByteString.Lazy as LBS
 import           Data.Text            (Text)
 import qualified Data.Text            as T
 import qualified Data.Text.IO         as TIO
@@ -34,18 +33,21 @@ import           System.Environment   (lookupEnv)
 import           System.Exit          (exitFailure)
 import           System.IO            (hPutStrLn, stderr)
 
+import           Chase.Annotations.Json (writeModuleAnnotations)
 import qualified Chase.Callers        as Callers
 import qualified Chase.GraceBridge    as GB
+import           Chase.Inference      (defaultAnnotationsTarget)
 import qualified Chase.Parse          as Parse
 import qualified Chase.Render         as Render
 import qualified Chase.Types          as CT
 import           Grace.Decode         (Key (..))
+import           Paths_chase          (getDataFileName)
 
 data Opts = Opts
   { optSource     :: FilePath
   , optKeyFile    :: Maybe FilePath
-  , optTemplate   :: FilePath
-  , optOutput     :: FilePath
+  , optTemplate   :: Maybe FilePath
+  , optOutput     :: Maybe FilePath
   , optMaxRetries :: Int
   , optRoots      :: [FilePath]
   , optVerbose    :: Bool
@@ -64,20 +66,20 @@ opts = Opts
            <> help "File holding the API key. Defaults to $OPENAI_API_KEY_FILE, then $OPENAI_API_KEY. Never pass a key as an argument."
             )
         )
-  <*> strOption
-        ( long "template"
-       <> metavar "FILE"
-       <> value "grace/genAnnotations.ffg"
-       <> showDefault
-       <> help "Grace prompt template"
+  <*> optional
+        ( strOption
+            ( long "template"
+           <> metavar "FILE"
+           <> help "Grace prompt template. Default: the genAnnotations.ffg installed with chase."
+            )
         )
-  <*> strOption
-        ( long "output"
-       <> short 'o'
-       <> metavar "FILE"
-       <> value "chase-annotations.json"
-       <> showDefault
-       <> help "Output annotations JSON path"
+  <*> optional
+        ( strOption
+            ( long "output"
+           <> short 'o'
+           <> metavar "FILE"
+           <> help "Output annotations JSON path. Default: the annotations file in the .inference directory of the project SOURCE is in, or chase-annotations.json there when it has none yet."
+            )
         )
   <*> option auto
         ( long "max-retries"
@@ -137,6 +139,17 @@ main = do
 
   key <- resolveKey optKeyFile
 
+  output <- case optOutput of
+    Just o  -> pure o
+    Nothing ->
+      defaultAnnotationsTarget optSource >>= \case
+        Just o  -> pure o
+        Nothing -> do
+          hPutStrLn stderr
+            ( "no output given and " <> optSource
+                <> " is in no project with a .inference directory; pass -o FILE or create .inference at the project root" )
+          exitFailure
+
   result <- Parse.parseSourceFile optSource
   case result of
     Left CT.ParseFailure{..} -> do
@@ -165,30 +178,36 @@ main = do
               <> map CT.sigName (CT.chaseForeignImports chaseFile)
           callerText = Callers.renderCallers callerIdx modName names
 
-      gen <- GB.loadGenerator optTemplate
+      -- The template ships with chase as a data file, so it is found
+      -- wherever chase-annotate runs. It used to default to the relative
+      -- path grace/genAnnotations.ffg, which exists only in chase's own
+      -- checkout.
+      template <- maybe (getDataFileName "grace/genAnnotations.ffg") pure optTemplate
+      gen <- GB.loadGenerator template
 
       (gen', drift) <- GB.generateWithDriftFeedback
                          gen optMaxRetries callerIdx chaseFile
                          (Key key) bundle src callerText
 
       let modAnn   = GB.toModuleAnnotations callerIdx modName gen'
-      let jsonOut  = annotationsToJSON modName modAnn
 
-      LBS.writeFile optOutput (A.encode jsonOut)
+      -- Only this module's generated fields are replaced. The rest of the
+      -- file, and this module's constants and topologies, are kept.
+      writeModuleAnnotations output modName (moduleFields modAnn) >>= \case
+        Left err -> do
+          hPutStrLn stderr err
+          exitFailure
+        Right () -> pure ()
 
       mapM_ (\w -> TIO.hPutStrLn stderr ("drift: " <> w)) drift
-      putStrLn ("wrote " <> optOutput)
+      putStrLn ("wrote " <> T.unpack modName <> " into " <> output)
 
-annotationsToJSON :: Text -> CT.ModuleAnnotations -> A.Value
-annotationsToJSON modName CT.ModuleAnnotations{..} = A.object
-  [ "version" A..= (1 :: Int)
-  , "modules" A..= A.object
-      [ Key.fromText modName A..= A.object
-          [ "invariants" A..= invariantsToJSON annInvariants
-          , "decisions"  A..= map decisionToJSON annDecisions
-          , "openIssues" A..= map openIssueToJSON annOpenIssues
-          ]
-      ]
+-- | The fields chase-annotate generates for one module.
+moduleFields :: CT.ModuleAnnotations -> A.Object
+moduleFields CT.ModuleAnnotations{..} = KM.fromList
+  [ ("invariants", invariantsToJSON annInvariants)
+  , ("decisions",  A.toJSON (map decisionToJSON annDecisions))
+  , ("openIssues", A.toJSON (map openIssueToJSON annOpenIssues))
   ]
 
 invariantsToJSON :: [CT.Invariant] -> A.Value

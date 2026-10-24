@@ -55,11 +55,12 @@
 -- ============================================================================
 --
 -- Everything Chase.Coverage's walk cannot see, this cannot see either, and
--- those limits are written down in %open_issue UnqualifiedNameMatching and
--- %open_issue HigherOrderReferencesMissed: names match unqualified, so two
--- modules exporting the same name share callers; references introduced by
--- Template Haskell splices, by instance dispatch, or through a record
--- selector are invisible.
+-- that limit is written down in %open_issue HigherOrderReferencesMissed:
+-- references introduced by Template Haskell splices, by instance dispatch,
+-- or through a record selector are invisible. Names are resolved through
+-- each file's imports since 2026-10-24, so two modules exporting the same
+-- name no longer share callers; an unqualified name in a file with several
+-- open imports is still credited to each of them.
 module Chase.Callers
   ( CallerIndex
   , ScanPlan (..)
@@ -80,17 +81,18 @@ import           Data.Text        (Text)
 import qualified Data.Text        as T
 import qualified Data.Text.IO     as TIO
 import           System.Directory
-  ( doesDirectoryExist, doesFileExist, listDirectory )
+  ( doesDirectoryExist, listDirectory )
 import           System.FilePath
   ( (</>), takeDirectory, takeExtension )
 
 import qualified Chase.Coverage   as Coverage
+import           Chase.Sources    (findSourceFiles)
 import           Chase.Types
 
--- | Referenced name to the bindings that reference it. Identical in shape
--- to Coverage.TestRefIndex because it is the same index built from
--- different files.
-type CallerIndex = Map.Map Text [TestRef]
+-- | (defining module, name) to the bindings that reference it. Identical
+-- in shape to Coverage.TestRefIndex because it is the same index built
+-- from different files, resolved through each file's imports.
+type CallerIndex = Map.Map (Text, Text) [TestRef]
 
 -- | Where a scan will look, and how that was decided, so the caller can
 -- print one honest line about it.
@@ -206,7 +208,7 @@ sourceDirsFromCabal = Data.List.nub . go False . T.lines
 -- correctness.
 buildCallerIndex :: Bool -> ScanPlan -> IO CallerIndex
 buildCallerIndex verbose ScanPlan{..} = do
-  files <- concat <$> mapM scanFiles spRoots
+  files <- concat <$> mapM findSourceFiles spRoots
   results <- forM files \p -> do
     r <- Coverage.parseTestFile p
     pure (p, r)
@@ -234,8 +236,8 @@ buildCallerIndex verbose ScanPlan{..} = do
 -- useful facts about runTransaction and it is a same-module edge; the
 -- only edge worth dropping is a function's reference to itself, which
 -- Coverage.buildTestIndex has already removed.
-callersOf :: CallerIndex -> Text -> [TestRef]
-callersOf idx name = Map.findWithDefault [] name idx
+callersOf :: CallerIndex -> Text -> Text -> [TestRef]
+callersOf idx modName name = Map.findWithDefault [] (modName, name) idx
 
 -- | Callers of a name as "Module.function", deduplicated, excluding the
 -- name's own definition site. This is what fills an invariant's consumes
@@ -244,7 +246,7 @@ callerNames :: CallerIndex -> Text -> Text -> [Text]
 callerNames idx modName name =
   Data.List.nub
     [ trModule r <> "." <> trFunction r
-    | r <- callersOf idx name
+    | r <- callersOf idx modName name
     , not (trModule r == modName && trFunction r == name)
     ]
 
@@ -265,22 +267,3 @@ renderCallers idx modName names =
       case callerNames idx modName n of
         [] -> "  " <> n <> ": no callers found in the scanned source dirs"
         cs -> "  " <> n <> ": " <> T.intercalate ", " cs
-
--- | Every .hs and .purs file under a root.
-scanFiles :: FilePath -> IO [FilePath]
-scanFiles root = do
-  isFile <- doesFileExist root
-  if isFile
-    then pure [root | takeExtension root `elem` [".hs", ".purs"]]
-    else do
-      exists <- doesDirectoryExist root
-      if not exists
-        then pure []
-        else do
-          entries <- Data.List.sort <$> listDirectory root
-          results <- forM (map (root </>) entries) \p -> do
-            isDir <- doesDirectoryExist p
-            if isDir
-              then scanFiles p
-              else pure [p | takeExtension p `elem` [".hs", ".purs"]]
-          pure (concat results)

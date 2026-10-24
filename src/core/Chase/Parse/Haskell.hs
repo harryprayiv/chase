@@ -5,6 +5,7 @@ module Chase.Parse.Haskell
   ( parseSourceFile
   , parseHsModule
   , moduleNameOf
+  , importInfosOf
   ) where
 
 import qualified Data.Text          as T
@@ -32,6 +33,8 @@ import GHC.Hs                    (HsModule (..), GhcPs)
 import GHC.Hs.Decls              (HsDecl (..), TyClDecl (..), InstDecl (..),
                                   ClsInstDecl (..), FamilyDecl (..), LHsDecl)
 import GHC.Hs.Binds              (Sig (..), LSig, HsBindLR (..))
+import GHC.Hs.ImpExp             (ImportDecl (..), ImportDeclQualifiedStyle (..),
+                                  ImportListInterpretation (..), IE (..), ieNames)
 import GHC.Parser.Annotation     (locA)
 import GHC.Types.Name.Reader     (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -39,6 +42,7 @@ import Language.Haskell.Syntax.Module.Name (moduleNameString)
 import GHC.Utils.Outputable      (ppr, showSDocUnsafe)
 
 import Chase.Types
+import Chase.Parse.Imports (ImportInfo (..), ImportNames (..))
 
 -- | Raw parse: returns the source text and the AST so other passes
 -- (Chase.Coverage) can walk it without re-parsing.
@@ -160,6 +164,31 @@ moduleNameOf :: HsModule GhcPs -> Text
 moduleNameOf m = case hsmodName m of
   Just lmn -> T.pack (moduleNameString (unLoc lmn))
   Nothing  -> ""
+
+-- | The module's imports in the shape "Chase.Coverage" resolves
+-- references against. An import list naming @T(..)@ lets through members
+-- that are not listed by name, so such a list counts as letting every name
+-- through.
+importInfosOf :: HsModule GhcPs -> [ImportInfo]
+importInfosOf m = map (one . unLoc) (hsmodImports m)
+  where
+    one d = ImportInfo
+      { impModule        = T.pack (moduleNameString (unLoc (ideclName d)))
+      , impAlias         = T.pack . moduleNameString . unLoc <$> ideclAs d
+      , impQualifiedOnly = case ideclQualified d of
+          NotQualified -> False
+          _            -> True
+      , impNames         = case ideclImportList d of
+          Nothing -> ImportAll
+          Just (Exactly, lies)
+            | any (isThingAll . unLoc) (unLoc lies) -> ImportAll
+            | otherwise -> ImportOnly (namesIn (unLoc lies))
+          Just (EverythingBut, lies) -> ImportHiding (namesIn (unLoc lies))
+      }
+    namesIn lies = [ rdrNameToText n | l <- lies, n <- ieNames (unLoc l) ]
+    isThingAll = \case
+      IEThingAll {} -> True
+      _             -> False
 
 importsOf :: HsModule GhcPs -> [Text]
 importsOf m = map renderImport (hsmodImports m)

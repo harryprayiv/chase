@@ -40,7 +40,9 @@ resolveConcurrency = 4
 resolveRetries :: Int
 resolveRetries = 3
 
--- | Exact local namespace names to skip outright.
+-- | Exact namespace names to skip at the branch root, where a Unison
+-- project keeps its dependencies. Deeper down a namespace called lib is
+-- the project's own code.
 defaultSkip :: [Text]
 defaultSkip = ["lib"]
 
@@ -56,7 +58,11 @@ isDependencyNamespace n =
   where
     isNumeric t = not (T.null t) && T.all isDigit t
 
--- | True if a namespace's local name should be pruned from the walk.
+-- | True if a namespace's local name, found at the branch root, should be
+-- pruned from the walk. Below the root nothing is pruned: until 2026-10-24
+-- a namespace called lib, or one ending in three numeric parts such as
+-- v_1_2_3, was skipped at any depth, so user code with those names was
+-- left out of the bundle.
 shouldSkipNamespace :: [Text] -> Text -> Bool
 shouldSkipNamespace skip name =
   name `elem` skip || isDependencyNamespace name
@@ -153,7 +159,7 @@ handleChild cb skip ns c acc =
        KType tag ->
          pure (Right (addReq h (ReqType tag) fullName acc))
        KNamespace _ ->
-         if shouldSkipNamespace skip (childName c)
+         if T.null ns && shouldSkipNamespace skip (childName c)
            then pure (Right acc)
            else walkNs cb skip fullName acc
 
