@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
--- | Load 'ModuleAnnotations' from a single JSON file. The shape:
+-- | Load 'ModuleAnnotations' from a single JSON file, and write skeleton
+-- entries into one. The shape:
 --
 -- > {
 -- >   "version": 1,
@@ -19,15 +20,19 @@
 -- >           "blocking": ["downstream feature", "..."],
 -- >           "affects": ["fn1", "fn2"] }
 -- >       ],
+-- >       "openQuestions": ["Should the token expire on rotation?"],
 -- >       "invariants": {
 -- >         "hashPassword": ["line one", "line two"],
 -- >         "createSession": {
--- >           "intent": "...",
--- >           "effects": ["DBPool", "IO"],
--- >           "notes":  ["..."],
--- >           "spec":   [{"input": "...", "expected": "..."}],
+-- >           "intent":   "...",
+-- >           "requires": ["the user is active"],
+-- >           "ensures":  ["one new session row"],
+-- >           "fails":    ["NotFound when the email is unknown"],
+-- >           "effects":  ["DBPool", "IO"],
+-- >           "notes":    ["..."],
+-- >           "spec":     [{"input": "...", "expected": "..."}],
 -- >           "consumes": ["Server.Auth.loginHandler", "..."],
--- >           "hint":   "body: ~30 lines, see source"
+-- >           "hint":     "body: ~30 lines, see source"
 -- >         }
 -- >       },
 -- >       "constants": [
@@ -43,12 +48,16 @@
 -- >   }
 -- > }
 --
--- "terminal" is optional. When present, the derive pass reports a vertex
--- outside it that has no outbound edge.
+-- "requires", "ensures" and "fails" follow Allium's rule shape: what
+-- must hold before, what holds after, how it fails. "openQuestions" are
+-- undecided design questions, which are not open issues (a known
+-- defect). "terminal" is optional; when present, the derive pass
+-- reports a vertex outside it with no outbound edge.
 module Chase.Annotations.Json
   ( loadAnnotations
   , loadAnnotationsIfExists
   , writeModuleAnnotations
+  , writeSkeleton
   ) where
 
 import qualified Data.Aeson as A
@@ -98,6 +107,37 @@ loadAnnotationsIfExists path = do
     then pure (Right Map.empty)
     else loadAnnotations path
 
+-- | The modules object of an existing version 1 annotations file, an
+-- empty one for a missing file, or the reason it cannot be used.
+existingModules :: FilePath -> IO (Either String A.Object)
+existingModules path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure (Right KM.empty)
+    else do
+      bs <- LBS.readFile path
+      pure $ case A.eitherDecode bs of
+        Left e -> Left (path <> ": " <> e <> "; not overwritten")
+        Right (A.Object root) -> case (KM.lookup "version" root, KM.lookup "modules" root) of
+          (v, Just (A.Object mods))
+            | maybe True (== A.Number 1) v -> Right mods
+          _ -> Left (path <> ": not a version 1 annotations file with a modules object; not overwritten")
+        Right _ -> Left (path <> ": not a JSON object; not overwritten")
+
+-- | Write a modules object as a version 1 file, beside itself and
+-- renamed into place so a failure part way leaves the old file whole.
+-- Indented, keys sorted, as the hand-kept files are.
+writeModules :: FilePath -> A.Object -> IO ()
+writeModules path mods = do
+  let root = KM.fromList
+        [ ("version", A.Number 1)
+        , ("modules", A.Object mods)
+        ]
+      tmp = path <> ".partial"
+  createDirectoryIfMissing True (takeDirectory path)
+  LBS.writeFile tmp (Pretty.encodePretty' Pretty.defConfig {Pretty.confIndent = Pretty.Spaces 2, Pretty.confCompare = compare} (A.Object root) <> "\n")
+  renameFile tmp path
+
 -- | Write one module's annotations into an annotations file, keeping
 -- everything else in it.
 --
@@ -107,42 +147,30 @@ loadAnnotationsIfExists path = do
 -- kept as it is. A file that does not exist is created with only this
 -- module. A file that is there but is not a version 1 annotations file is
 -- refused and left untouched: overwriting it would lose what it holds.
---
--- The file is written beside itself and renamed into place, so a failure
--- part way leaves the old file whole. It is written indented, as the
--- hand-kept files are; keys come out in sorted order.
 writeModuleAnnotations :: FilePath -> Text -> A.Object -> IO (Either String ())
-writeModuleAnnotations path modName fields = do
-  exists <- doesFileExist path
-  existing <-
-    if not exists
-      then pure (Right KM.empty)
-      else do
-        bs <- LBS.readFile path
-        pure $ case A.eitherDecode bs of
-          Left e -> Left (path <> ": " <> e <> "; not overwritten")
-          Right (A.Object root) -> case (KM.lookup "version" root, KM.lookup "modules" root) of
-            (v, Just (A.Object mods))
-              | maybe True (== A.Number 1) v -> Right mods
-            _ -> Left (path <> ": not a version 1 annotations file with a modules object; not overwritten")
-          Right _ -> Left (path <> ": not a JSON object; not overwritten")
-  case existing of
+writeModuleAnnotations path modName fields =
+  existingModules path >>= \case
     Left e -> pure (Left e)
     Right mods -> do
       let key = Key.fromText modName
           old = case KM.lookup key mods of
             Just (A.Object o) -> o
             _                 -> KM.empty
-          merged = KM.union fields old
-          root = KM.fromList
-            [ ("version", A.Number 1)
-            , ("modules", A.Object (KM.insert key (A.Object merged) mods))
-            ]
-          tmp = path <> ".partial"
-      createDirectoryIfMissing True (takeDirectory path)
-      LBS.writeFile tmp (Pretty.encodePretty' Pretty.defConfig {Pretty.confIndent = Pretty.Spaces 2, Pretty.confCompare = compare} (A.Object root) <> "\n")
-      renameFile tmp path
+      writeModules path (KM.insert key (A.Object (KM.union fields old)) mods)
       pure (Right ())
+
+-- | Add skeleton entries for the modules the file does not have yet.
+-- Modules already in the file are left exactly as they are. Returns the
+-- names of the modules added.
+writeSkeleton :: FilePath -> [(Text, A.Object)] -> IO (Either String [Text])
+writeSkeleton path entries =
+  existingModules path >>= \case
+    Left e -> pure (Left e)
+    Right mods -> do
+      let fresh = [ (m, o) | (m, o) <- entries, not (KM.member (Key.fromText m) mods) ]
+          mods' = foldr (\(m, o) acc -> KM.insert (Key.fromText m) (A.Object o) acc) mods fresh
+      writeModules path mods'
+      pure (Right (map fst fresh))
 
 -- top level ------------------------------------------------------------
 
@@ -165,23 +193,25 @@ parseModulesMap obj =
 parseModule :: Text -> A.Value -> AT.Parser ModuleAnnotations
 parseModule modName =
   A.withObject ("module " <> T.unpack modName) $ \o -> do
-    consts  <- o A..:? "constants"  A..!= []
-    invsObj <- o A..:? "invariants" A..!= KM.empty
-    decs    <- o A..:? "decisions"  A..!= []
-    issues  <- o A..:? "openIssues" A..!= []
-    tops    <- o A..:? "topologies" A..!= []
+    consts    <- o A..:? "constants"     A..!= []
+    invsObj   <- o A..:? "invariants"    A..!= KM.empty
+    decs      <- o A..:? "decisions"     A..!= []
+    issues    <- o A..:? "openIssues"    A..!= []
+    questions <- o A..:? "openQuestions" A..!= []
+    tops      <- o A..:? "topologies"    A..!= []
     pConsts <- mapM parseConstant consts
     pInvs   <- parseInvariantsMap invsObj
     pDecs   <- mapM parseDecision decs
     pIssues <- mapM parseOpenIssue issues
     pTops   <- mapM parseTopology tops
     pure ModuleAnnotations
-      { annModName    = modName
-      , annConstants  = pConsts
-      , annInvariants = pInvs
-      , annDecisions  = pDecs
-      , annOpenIssues = pIssues
-      , annTopologies = pTops
+      { annModName       = modName
+      , annConstants     = pConsts
+      , annInvariants    = pInvs
+      , annDecisions     = pDecs
+      , annOpenIssues    = pIssues
+      , annOpenQuestions = questions
+      , annTopologies    = pTops
       }
 
 -- constants ------------------------------------------------------------
@@ -207,8 +237,8 @@ noteFromText t = case T.stripPrefix "BUG: " t of
 -- | Each invariant value is either:
 --
 --   * an array of strings (the @!@ lines verbatim, no consumes), or
---   * an object with optional fields @intent@, @effects@, @notes@,
---     @spec@, @consumes@, @hint@.
+--   * an object with optional fields @intent@, @requires@, @ensures@,
+--     @fails@, @effects@, @notes@, @spec@, @consumes@, @hint@.
 parseInvariantsMap :: A.Object -> AT.Parser [Invariant]
 parseInvariantsMap obj = mapM parseOne (KM.toList obj)
   where
@@ -224,17 +254,27 @@ parseInvariantValue fnName = \case
 parseObjectInvariant :: Text -> A.Object -> AT.Parser Invariant
 parseObjectInvariant fnName o = do
   mIntent  <- o A..:? "intent"
+  requires <- o A..:? "requires" A..!= ([] :: [Text])
+  ensures  <- o A..:? "ensures"  A..!= ([] :: [Text])
+  fails    <- o A..:? "fails"    A..!= ([] :: [Text])
   effects  <- o A..:? "effects"  A..!= ([] :: [Text])
   notes    <- o A..:? "notes"    A..!= ([] :: [Text])
   specs    <- o A..:? "spec"     A..!= ([] :: [SpecEntry])
   consumes <- o A..:? "consumes" A..!= ([] :: [Text])
   hint     <- o A..:? "hint"
-  let intentLine = maybe [] (\t -> ["intent: " <> t]) mIntent
+  let intentLine = [ "intent: " <> t | Just t <- [mIntent], not (T.null t) ]
+      prefixed p = map ((p <> ": ") <>)
       effectLine =
         if null effects
           then []
           else ["effects: " <> T.intercalate ", " effects]
-      lns = intentLine <> effectLine <> notes <> map renderSpec specs
+      lns = intentLine
+         <> prefixed "requires" requires
+         <> prefixed "ensures" ensures
+         <> prefixed "fails" fails
+         <> effectLine
+         <> notes
+         <> map renderSpec specs
   pure $ Invariant fnName lns consumes hint
 
 data SpecEntry = SpecEntry

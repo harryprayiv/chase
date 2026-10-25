@@ -62,6 +62,9 @@ data ChaseFile = ChaseFile
   , chaseInvariants     :: [Invariant]
   , chaseDecisions      :: [Decision]
   , chaseOpenIssues     :: [OpenIssue]
+  , chaseOpenQuestions  :: [Text]
+  -- ^ undecided design questions, distinct from open issues, which are
+  -- known defects
   , chaseTopologies     :: [Topology]
   , chaseParseErrors    :: [Text]
   , chaseTestCoverage   :: Maybe [(Text, [TestRef])]
@@ -95,6 +98,7 @@ emptyChaseFile lang path = ChaseFile
   , chaseInvariants     = []
   , chaseDecisions      = []
   , chaseOpenIssues     = []
+  , chaseOpenQuestions  = []
   , chaseTopologies     = []
   , chaseParseErrors    = []
   , chaseTestCoverage   = Nothing
@@ -133,17 +137,18 @@ data ChaseDataDecl = ChaseDataDecl
   deriving stock (Show, Generic)
 
 data ModuleAnnotations = ModuleAnnotations
-  { annModName    :: Text
-  , annConstants  :: [Constant]
-  , annInvariants :: [Invariant]
-  , annDecisions  :: [Decision]
-  , annOpenIssues :: [OpenIssue]
-  , annTopologies :: [Topology]
+  { annModName       :: Text
+  , annConstants     :: [Constant]
+  , annInvariants    :: [Invariant]
+  , annDecisions     :: [Decision]
+  , annOpenIssues    :: [OpenIssue]
+  , annOpenQuestions :: [Text]
+  , annTopologies    :: [Topology]
   }
   deriving stock (Show, Generic)
 
 emptyAnnotations :: Text -> ModuleAnnotations
-emptyAnnotations m = ModuleAnnotations m [] [] [] [] []
+emptyAnnotations m = ModuleAnnotations m [] [] [] [] [] []
 
 data Constant = Constant
   { constName     :: Text

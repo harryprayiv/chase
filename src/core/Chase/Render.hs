@@ -30,6 +30,7 @@ renderChaseFile cf@ChaseFile{..} = T.unlines $
   <> renderSignaturesWithInvariants chaseSignatures extras
   <> renderDecisions  chaseDecisions
   <> renderOpenIssues chaseOpenIssues
+  <> renderOpenQuestions chaseOpenQuestions
   <> renderParseErrors chaseParseErrors
   where
     header =
@@ -276,6 +277,11 @@ renderOpenIssues is = concatMap one is
          | not (null oiAffects)
          ]
       <> [""]
+
+-- | Undecided design questions, one line each.
+renderOpenQuestions :: [Text] -> [Text]
+renderOpenQuestions [] = []
+renderOpenQuestions qs = [ "%open_question " <> q | q <- qs ] <> [""]
 
 renderParseErrors :: [Text] -> [Text]
 renderParseErrors [] = []

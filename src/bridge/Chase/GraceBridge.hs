@@ -21,16 +21,29 @@
 --
 -- bundle: the rendered skeleton. Every signature in one place, the
 -- imports, the data declarations, the invariants already recorded for
--- neighbouring functions.
+-- neighbouring functions, and since 2026-10-25 the derived ~ lines: the
+-- clauses, failures, effects and callers chase read from the code.
 --
 -- source: the module's text, WITH the function bodies the skeleton drops
 -- by design. Without it the model was asked for behavioural facts from a
 -- prompt containing no behaviour and restated the type nine times, through
 -- two retries that told it not to.
 --
--- callers: who calls each function, derived by scanning the project's
--- declared source directories. Asked to produce this itself, the model
--- returned module names from the %uses lines.
+-- callers: who calls each function, from the project's HIE files when
+-- there are any, else from a scan of its declared source directories.
+-- Asked to produce this itself, the model returned module names from the
+-- %uses lines.
+--
+-- ============================================================================
+-- WHAT THE MODEL IS ASKED FOR
+-- ============================================================================
+--
+-- Since 2026-10-25 an invariant has the shape of an Allium rule: what
+-- must hold before (requires), what holds after (ensures), how it fails
+-- (fails), plus free notes (body). The structure is the point: a claim
+-- in a slot is checkable against the derived facts in the bundle, and a
+-- model given slots fills them with facts more often than it fills a
+-- blank with a restatement.
 --
 -- ============================================================================
 -- EVERY NOTE IS CHECKED AGAINST ITS OWN FUNCTION
@@ -92,14 +105,19 @@ data GenAnnotations = GenAnnotations
   } deriving stock    (Generic, Show)
     deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
 
--- | One invariant attached to a signature. `body` is the list of
--- behavioural facts that render under the signature in chase output
--- (the lines prefixed with `!`). Named `body` rather than `lines` so it
--- does not shadow `Prelude.lines` under `RecordWildCards`.
+-- | One invariant attached to a signature, in the shape of a rule:
+-- `requires` is what must hold before the call, `ensures` what holds
+-- after, `fails` how it fails, and `body` the free notes. Each list
+-- renders under the signature as `!` lines, the first three with their
+-- name as a prefix. Named `body` rather than `lines` so it does not
+-- shadow `Prelude.lines` under `RecordWildCards`.
 --
 -- No consumes field: that is derived from the call graph, not asked for.
 data GenInvariant = GenInvariant
   { function :: Text
+  , requires :: [Text]
+  , ensures  :: [Text]
+  , fails    :: [Text]
   , body     :: [Text]
   } deriving stock    (Generic, Show)
     deriving anyclass (FromGrace, ToGraceType, FromJSON, ToJSON)
@@ -187,11 +205,12 @@ generateWithDriftFeedback gen maxRetries callerIdx chaseFile k bundle src caller
             else loop (attempt + 1) fresh (Just bestSoFar)
 
 -- | Remove every invariant line that names something absent from its own
--- function's definition, and say which, so a retry can replace it.
+-- function's definition, and say which, so a retry can replace it. All
+-- four lists are checked the same way.
 --
--- An invariant left with no lines is dropped entirely: an empty invariant
--- is exactly the vacuous annotation the template tells the model not to
--- write.
+-- An invariant left with nothing in any list is dropped entirely: an
+-- empty invariant is exactly the vacuous annotation the template tells
+-- the model not to write.
 dropUnsupportedNotes :: CT.ChaseFile -> Text -> GenAnnotations -> (GenAnnotations, [Text])
 dropUnsupportedNotes chaseFile src ga@GenAnnotations{..} =
   let checked = map checkOne invariants
@@ -210,9 +229,15 @@ dropUnsupportedNotes chaseFile src ga@GenAnnotations{..} =
             case [ w | w <- noteIdentifiers line, not (T.toLower w `T.isInfixOf` scope) ] of
               [] -> Right line
               missing -> Left (line, missing)
-          results = map judge body
-          keptLines = [ l | Right l <- results ]
-          dropped = [ (l, m) | Left (l, m) <- results ]
+          sift ls =
+            let results = map judge ls
+            in ( [ l | Right l <- results ]
+               , [ (l, m) | Left (l, m) <- results ] )
+          (keptRequires, droppedRequires) = sift requires
+          (keptEnsures,  droppedEnsures)  = sift ensures
+          (keptFails,    droppedFails)    = sift fails
+          (keptBody,     droppedBody)     = sift body
+          dropped = droppedRequires <> droppedEnsures <> droppedFails <> droppedBody
           warnsFor =
             [ "invariant for " <> function <> " says \"" <> T.take 80 l <> "\", but "
                 <> T.intercalate ", " (take 3 m)
@@ -221,9 +246,12 @@ dropUnsupportedNotes chaseFile src ga@GenAnnotations{..} =
                 <> "'s body does; facts about its neighbours belong to them."
             | (l, m) <- dropped
             ]
-      in if null keptLines
+          empty = null keptRequires && null keptEnsures && null keptFails && null keptBody
+      in if empty
            then (Nothing, warnsFor)
-           else (Just inv { body = keptLines }, warnsFor)
+           else ( Just inv { requires = keptRequires, ensures = keptEnsures
+                           , fails = keptFails, body = keptBody }
+                , warnsFor )
 
 -- | One declaration's text: from the first line that starts with its name
 -- in column zero (normally the signature) through every following line
@@ -277,21 +305,29 @@ noteIdentifiers t =
 
 -- | Convert the grace-shaped result into chase's existing types, filling
 -- each invariant's consumes from the call graph rather than from the
--- model.
+-- model. The requires, ensures and fails lists become prefixed lines, the
+-- same form the annotations loader gives them, so a generated file and a
+-- hand-written one render alike.
 toModuleAnnotations
   :: Callers.CallerIndex -> Text -> GenAnnotations -> CT.ModuleAnnotations
 toModuleAnnotations callerIdx modNm GenAnnotations{..} = CT.ModuleAnnotations
-  { CT.annModName    = modNm
-  , CT.annConstants  = []
-  , CT.annInvariants = map invToInv invariants
-  , CT.annDecisions  = map decToDec decisions
-  , CT.annOpenIssues = map oiToOi   openIssues
-  , CT.annTopologies = []
+  { CT.annModName       = modNm
+  , CT.annConstants     = []
+  , CT.annInvariants    = map invToInv invariants
+  , CT.annDecisions     = map decToDec decisions
+  , CT.annOpenIssues    = map oiToOi   openIssues
+  , CT.annOpenQuestions = []
+  , CT.annTopologies    = []
   }
   where
+    prefixed p = map ((p <> ": ") <>)
+
     invToInv GenInvariant{..} = CT.Invariant
       { CT.invFunction = function
-      , CT.invLines    = body
+      , CT.invLines    = prefixed "requires" requires
+                      <> prefixed "ensures" ensures
+                      <> prefixed "fails" fails
+                      <> body
       , CT.invConsumes = Callers.callerNames callerIdx modNm function
       , CT.invBodyHint = Nothing
       }
@@ -315,9 +351,10 @@ toModuleAnnotations callerIdx modNm GenAnnotations{..} = CT.ModuleAnnotations
 -- drift checking can run against the actual structure.
 mergeForCheck :: CT.ChaseFile -> CT.ModuleAnnotations -> CT.ChaseFile
 mergeForCheck cf CT.ModuleAnnotations{..} = cf
-  { CT.chaseInvariants = annInvariants
-  , CT.chaseDecisions  = annDecisions
-  , CT.chaseOpenIssues = annOpenIssues
-  , CT.chaseConstants  = annConstants
-  , CT.chaseTopologies = annTopologies
+  { CT.chaseInvariants    = annInvariants
+  , CT.chaseDecisions     = annDecisions
+  , CT.chaseOpenIssues    = annOpenIssues
+  , CT.chaseOpenQuestions = annOpenQuestions
+  , CT.chaseConstants     = annConstants
+  , CT.chaseTopologies    = annTopologies
   }

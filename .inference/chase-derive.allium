@@ -1,21 +1,28 @@
 -- allium: 3
 -- chase-derive.allium
 --
--- The derive pass (Phases 0 and 1 of the Allium-influenced changes,
--- 2026-10-25): facts chase reads from parsed bodies and from the
--- compiler's HIE files, and the checks that hold hand-written annotations
--- to them. Companion to chase.allium, which covers everything else about
--- chase. Merge into it once both phases have run on a real project.
+-- The derive pass (Phases 0 to 2 of the Allium-influenced changes, and
+-- the skeleton generator, 2026-10-25): facts chase reads from parsed
+-- bodies, from the compiler's HIE files and from its build log, the
+-- checks that hold hand-written annotations to them, and the skeleton
+-- annotations built from them. Companion to chase.allium, which covers
+-- everything else about chase. Merge into it once these have run on a
+-- real project other than chase.
+--
+-- Probes D1 to D5 are test/Probe.hs (cabal test chase-probes).
 --
 -- Scope
 --   Includes: the Haskell derive pass over the parsed tree, the run-wide
 --             constructor map, derived transitions, abstract types,
 --             constant candidates, the three topology checks and the
 --             consumes check (Phase 0); HIE reading, resolved callers,
---             external uses, unreferenced bindings and constructor usage
---             (Phase 1).
---   Excludes: compiler diagnostics (Phase 2), the PureScript derive pass
---             (Phase 4).
+--             effectful external uses, unreferenced bindings and
+--             constructor usage (Phase 1); the build log's warnings
+--             attached to signatures (Phase 2); the %untested block; the
+--             structured invariant fields and open questions; the
+--             skeleton generator.
+--   Excludes: the PureScript derive pass (Phase 4), chase-annotate's
+--             prompt (grace/genAnnotations.ffg), the Unison path.
 
 ------------------------------------------------------------
 -- External Entities
@@ -25,6 +32,8 @@ external entity ChaseRun {
     roots: List<String>
     derive_enabled: Boolean
     hie_dir: String?
+    build_log: BuildLog?
+    skeleton_target: AnnotationsFile?
     skeletons: Skeleton with run = this
     hie_modules: HieModule with run = this
 }
@@ -32,6 +41,16 @@ external entity ChaseRun {
 external entity HieFile {
     path: String
     ghc_version: String
+}
+
+external entity BuildLog {
+    path: String
+    text: String
+}
+
+external entity AnnotationsFile {
+    path: String
+    modules: Set<String>
 }
 
 ------------------------------------------------------------
@@ -80,6 +99,14 @@ value Binding {
     name: String
     line: Integer
     refs: List<Ref>
+}
+
+value GhcWarning {
+    file: String
+    line: Integer
+    flag: String
+    message: String
+    function: String?
 }
 
 ------------------------------------------------------------
@@ -142,6 +169,22 @@ entity HieFacts {
     skeleton: Skeleton
     uses: Map<String, List<String>>
     unreferenced: List<String>
+}
+
+entity SkeletonEntry {
+    skeleton: Skeleton
+    invariants: Map<String, SkeletonInvariant>
+    constants: List<String>
+    topologies: List<TopologyAnnotation>
+}
+
+value SkeletonInvariant {
+    intent: String
+    requires: List<String>
+    ensures: List<String>
+    fails: List<String>
+    effects: List<String>
+    consumes: List<String>
 }
 
 entity ConstructorUsage {
@@ -394,6 +437,75 @@ rule CheckTopologyExits {
         -- state is terminal.
 }
 
+rule ReadBuildLog {
+    when: BuildLogGiven(run)
+    requires: exists run.build_log
+    ensures:
+        for block in warning_blocks(run.build_log.text):
+            GhcWarning(block.file, block.line, block.flag, block.message, null)
+    ensures: two warnings with the same file, line and flag are one
+    ensures: error blocks and blocks with no source location are skipped
+
+    @guidance
+        -- A block starts with a line whose location ends in .hs or .purs
+        -- followed by ": warning:", and runs through the indented lines
+        -- after it. GHC 9.6 has no JSON diagnostics, so the text is the
+        -- source. A module in several components is warned about once per
+        -- component; hence the dedup. Warnings exist only for modules the
+        -- compiler compiled, so the log must come from a full compile.
+}
+
+rule AttachWarnings {
+    when: skeleton: Skeleton.created
+    requires: exists skeleton.run.build_log
+    ensures:
+        for w in run warnings where w.file is a path suffix of
+                skeleton.source.path or the reverse:
+            w.function = the signature of skeleton with the greatest line
+                         at or before w.line, or null when none precedes it
+            skeleton.warnings.add(w)
+    ensures: warnings matching no skeleton are counted and reported once
+
+    @guidance
+        -- The log's paths are relative to the package directory and the
+        -- skeleton's to the run's roots, so the match is by suffix either
+        -- way. A warning with function = null renders as a %ghc line at
+        -- the top of the block; the others as ~ ghc lines under their
+        -- signature. The compiler's pattern checker is what decides
+        -- unhandled constructors and unreachable alternatives, which is
+        -- what an Allium graph calls dead transitions and deadlocks.
+}
+
+rule WriteSkeleton {
+    when: RunFinished(run)
+    requires: exists run.skeleton_target
+    for s in run.skeletons where s.module_name not in run.skeleton_target.modules:
+        ensures:
+            let e = SkeletonEntry.created(skeleton: s)
+            for f in s.signatures:
+                e.invariants[f] = SkeletonInvariant(
+                    intent: "",
+                    requires: s.derived.clauses[f],
+                    ensures: [],
+                    fails: s.derived.fails[f],
+                    effects: s.hie_facts.uses[f],
+                    consumes: s.derived.callers[f])
+            e.constants = s.derived.const_candidates -> name
+            e.topologies = for t in run derived topologies where
+                t.module_name = s.module_name:
+                    TopologyAnnotation(t.type_name, t.constructors,
+                        edges of t where from != "*", terminal: [])
+            run.skeleton_target.modules.add(s.module_name)
+    ensures: modules already in run.skeleton_target are unchanged
+    ensures: the file is written beside itself and renamed into place
+
+    @guidance
+        -- The deterministic half of Allium's distill. Everything the
+        -- derive pass knows is filled in; intent, ensures, notes,
+        -- decisions, open issues, open questions and the terminal lists
+        -- are left for the author. Re-running adds only new modules.
+}
+
 rule CheckConsumesAgainstCallers {
     when: skeleton: Skeleton.rendered becomes true
     requires: exists skeleton.derived
@@ -443,6 +555,17 @@ invariant NoHieIsPhaseZero {
         r.hie_modules.count = 0 implies bundle_bytes(r) = bundle_bytes_after_phase_0(r)
 }
 
+invariant SkeletonIsIdempotent {
+    for r in ChaseRuns:
+        exists r.skeleton_target implies
+            write_skeleton(write_skeleton(r)) = write_skeleton(r)
+}
+
+invariant SkeletonRoundTrips {
+    for e in SkeletonEntries:
+        load(render_json(e)) = e
+}
+
 invariant DeriveOffIsTheOldOutput {
     for r in ChaseRuns:
         not r.derive_enabled implies bundle_bytes(r) = bundle_bytes_before_phase_0(r)
@@ -465,6 +588,7 @@ deferred first_word(text)
 deferred is_qualified_function(token)
 deferred hie_files_under(dir)
 deferred chase_ghc_version
+deferred warning_blocks(text)
 
 ------------------------------------------------------------
 -- Open Questions
@@ -477,5 +601,7 @@ open question "The caller index parses every source file a second time. Should t
 open question "Instance method bodies are not attributed to any binding, so a constructor used only inside an instance is reported as never built or never matched, and a function called only from an instance has no callers. Should instance methods become bindings named Class.Type.method?"
 
 open question "A project of several packages writes one .inference/hie per package directory, and chase reads only the root one by default. Should the auto-detection walk the hs-source-dirs of every .cabal under the root, or should the cabal.project.local point every package at one directory?"
+
+open question "An unfilled skeleton invariant (empty intent, derived lists only) renders nothing beyond what the ~ lines already say. Should the renderer skip invariants whose every field came from the derive pass, so the bundle does not carry the same fact twice?"
 
 open question "PureScript has the same clause, failure and transition shapes in its CST. Is the Phase 0 pass worth porting before Phase 4 (CoreFn) exists, or does CoreFn make the syntactic pass redundant on that side?"

@@ -200,6 +200,7 @@ library
     Chase.Parse.PureScript
     Chase.Pipeline
     Chase.Render
+    Chase.Skeleton
     Chase.Sources
   reexported-modules:
     Chase.Types,

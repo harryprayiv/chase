@@ -35,6 +35,7 @@ data Options = Options
   , optTests       :: TestsMode
   , optHie         :: PathMode
   , optGhcLog      :: PathMode
+  , optSkeleton    :: Maybe FilePath
   , optDerive      :: Bool
   , optQuiet       :: Bool
   }
@@ -99,6 +100,19 @@ options = Options
         \point at. Default: .inference/build.log in the project SOURCE is \
         \in, when it exists."
         "Do not read a build log even if .inference/build.log exists."
+  <*> optional
+        ( strOption
+            ( long "skeleton"
+           <> metavar "FILE"
+           <> help "Add a skeleton annotations entry to FILE for every \
+                   \parsed module FILE does not have yet: invariants with \
+                   \requires, fails, effects and consumes filled from the \
+                   \derived facts and an empty intent, constants from the \
+                   \candidates, topologies from the derived edges with an \
+                   \empty terminal list. Modules already in FILE are kept \
+                   \as they are."
+            )
+        )
   <*> fmap not
         ( switch
             ( long "no-derive"
@@ -182,6 +196,7 @@ run opts = do
               , Pipeline.cfgDerive      = optDerive opts
               , Pipeline.cfgHieDir      = hieDir
               , Pipeline.cfgGhcLog      = ghcLog
+              , Pipeline.cfgSkeleton    = optSkeleton opts
               }
   Pipeline.runChase cfg
 

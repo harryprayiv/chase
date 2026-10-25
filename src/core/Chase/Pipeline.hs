@@ -32,12 +32,14 @@ import qualified Data.List
 import           Chase.Types
 import           Chase.Parse
 import           Chase.Render
+import           Chase.Annotations.Json (writeSkeleton)
 import qualified Chase.Callers       as Callers
 import qualified Chase.Coverage      as Coverage
 import           Chase.Derive
 import           Chase.Derive.GhcLog (attachGhcWarnings, parseGhcLog, unattached)
 import           Chase.Derive.Hie    (constructorUsage, hieCallerIndex, hieFactsFor)
 import           Chase.Hie           (HieModule, readHieDir)
+import           Chase.Skeleton      (skeletonEntry)
 import           Chase.Sources       (findSourceFiles)
 
 data ChaseConfig = ChaseConfig
@@ -57,6 +59,9 @@ data ChaseConfig = ChaseConfig
   , cfgGhcLog      :: Maybe FilePath
   -- ^ a GHC build log; its warnings are attached to the signatures they
   -- point at
+  , cfgSkeleton    :: Maybe FilePath
+  -- ^ an annotations file to add skeleton entries to, for every module
+  -- it does not have yet
   }
 
 defaultConfig :: ChaseConfig
@@ -70,6 +75,7 @@ defaultConfig = ChaseConfig
   , cfgDerive      = True
   , cfgHieDir      = Nothing
   , cfgGhcLog      = Nothing
+  , cfgSkeleton    = Nothing
   }
 
 -- | One source file after parsing.
@@ -121,11 +127,17 @@ runChase cfg = do
       stray = unattached warnings (map parsedFile oks)
   when (not (null stray)) $
     putStrLn $ "ghc    " <> show (length stray) <> " warnings point at files outside this run"
-  parsed <- case cfgBundleFile cfg of
+  merged <- case cfgBundleFile cfg of
     Nothing     -> runPerFile  cfg ctx items
     Just bundle -> runBundled  cfg ctx items bundle
+  let parsed = Set.fromList (map chaseModuleName merged)
   forM_ (unmatchedAnnotations (cfgAnnotations cfg) parsed) \w ->
     putStrLn $ "  drift: " <> T.unpack w
+  forM_ (cfgSkeleton cfg) \path -> do
+    r <- writeSkeleton path [ (chaseModuleName m, skeletonEntry tops m) | m <- merged ]
+    case r of
+      Left e      -> putStrLn ("skeleton: " <> e)
+      Right added -> putStrLn ("skeleton: " <> show (length added) <> " modules added to " <> path)
 
 -- | The HIE files, when a directory was given. Files that cannot be read
 -- are reported one per line; a GHC version other than chase's own is the
@@ -229,41 +241,41 @@ finishFile ChaseConfig{..} RunContext{..} p =
 
 -- | Writes one .chase per source file, plus DERIVED.chase for the
 -- run-wide transitions and constructor usage when there are any. Returns
--- the modules parsed, and likewise for 'runBundled'.
-runPerFile :: ChaseConfig -> RunContext -> [Item] -> IO (Set Text)
+-- the merged files, and likewise for 'runBundled'.
+runPerFile :: ChaseConfig -> RunContext -> [Item] -> IO [ChaseFile]
 runPerFile cfg@ChaseConfig{..} ctx items = do
   createDirectoryIfMissing True cfgOutputDir
-  parsed <- fmap (Set.fromList . concat) . forM items $ \case
+  merged <- fmap concat . forM items $ \case
     ItemFailed _ _ -> pure []
     ItemOk src p -> do
-      let (merged, drift) = finishFile cfg ctx p
+      let (file, drift) = finishFile cfg ctx p
           outPath  = mkOutputPath cfgOutputDir cfgSourceRoots src
-          rendered = renderChaseFile merged
+          rendered = renderChaseFile file
       forM_ drift \w ->
         putStrLn $ "  drift: " <> T.unpack w
       createDirectoryIfMissing True (takeDirectory outPath)
       TIO.writeFile outPath rendered
       when cfgVerbose $ putStrLn $ "write  " <> outPath
-      pure [chaseModuleName merged]
+      pure [file]
   let tail' = runTail ctx
   when (not (T.null tail')) $ do
     let derivedPath = cfgOutputDir </> "DERIVED.chase"
     TIO.writeFile derivedPath tail'
     when cfgVerbose $ putStrLn $ "write  " <> derivedPath
-  pure parsed
+  pure merged
 
-runBundled :: ChaseConfig -> RunContext -> [Item] -> FilePath -> IO (Set Text)
+runBundled :: ChaseConfig -> RunContext -> [Item] -> FilePath -> IO [ChaseFile]
 runBundled cfg@ChaseConfig{..} ctx items bundlePath = do
   createDirectoryIfMissing True (takeDirectory bundlePath)
   blocks <- forM items \case
     ItemFailed src msg ->
       pure (Nothing, renderFailureBlock cfgSourceRoots src msg)
     ItemOk src p -> do
-      let (merged, drift) = finishFile cfg ctx p
-          rendered = renderChaseFile merged
+      let (file, drift) = finishFile cfg ctx p
+          rendered = renderChaseFile file
       forM_ drift \w ->
         putStrLn $ "  drift: " <> T.unpack w
-      pure (Just (chaseModuleName merged), renderBundleBlock cfgSourceRoots src rendered)
+      pure (Just file, renderBundleBlock cfgSourceRoots src rendered)
   let successes = length [ () | (Just _, _) <- blocks ]
       failures  = length [ () | (Nothing, _) <- blocks ]
       bundle = renderPreamble cfgSourceRoots successes failures
@@ -274,7 +286,7 @@ runBundled cfg@ChaseConfig{..} ctx items bundlePath = do
     putStrLn $ "bundled " <> show successes
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
-  pure (Set.fromList [ m | (Just m, _) <- blocks ])
+  pure [ f | (Just f, _) <- blocks ]
 
 -- | The run-wide sections that follow the per-file blocks.
 runTail :: RunContext -> Text
@@ -302,10 +314,13 @@ renderPreamble roots ok failed =
     , "# %topology, %abstract, %untested, data decls, %foreign (PureScript"
     , "# only), %pattern, type signatures with attached lines, %decision"
     , "# blocks, %open_issue blocks (known problems with blocking/affects"
-    , "# targets), and parse errors. Function bodies are deliberately omitted."
+    , "# targets), %open_question lines (undecided design questions), and"
+    , "# parse errors. Function bodies are deliberately omitted."
     , "#"
     , "# Lines under a signature, by sigil:"
-    , "#   !  a hand-written invariant: a behavioral fact the type does not carry"
+    , "#   !  a hand-written invariant: a behavioral fact the type does not carry."
+    , "#      intent:, requires:, ensures:, fails: and effects: prefixes are the"
+    , "#      author's structured claims; the rest are free notes"
     , "#   >  a hand-written consumer of the function or its side effects"
     , "#   ~  a fact chase read from the code itself. From the parse these are"
     , "#      may-facts: a clause may be unreachable, a failure may be on a"
@@ -363,11 +378,12 @@ attachAnnotations annMap cf =
   case Map.lookup (chaseModuleName cf) annMap of
     Nothing -> cf
     Just ModuleAnnotations{..} -> cf
-      { chaseConstants  = annConstants
-      , chaseInvariants = annInvariants
-      , chaseDecisions  = annDecisions
-      , chaseOpenIssues = annOpenIssues
-      , chaseTopologies = annTopologies
+      { chaseConstants     = annConstants
+      , chaseInvariants    = annInvariants
+      , chaseDecisions     = annDecisions
+      , chaseOpenIssues    = annOpenIssues
+      , chaseOpenQuestions = annOpenQuestions
+      , chaseTopologies    = annTopologies
       }
 
 -- | Drift checks over a merged ChaseFile.
