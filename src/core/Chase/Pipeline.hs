@@ -20,7 +20,6 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import Data.Char (isAlpha, isAlphaNum, isDigit, isUpper)
 import Control.Monad (forM, forM_, when)
-import Data.IORef (newIORef, modifyIORef', readIORef)
 import System.Directory
   ( createDirectoryIfMissing )
 import System.FilePath
@@ -32,7 +31,9 @@ import qualified Data.List
 import           Chase.Types
 import           Chase.Parse
 import           Chase.Render
+import qualified Chase.Callers  as Callers
 import qualified Chase.Coverage as Coverage
+import           Chase.Derive
 import           Chase.Sources (findSourceFiles)
 
 data ChaseConfig = ChaseConfig
@@ -42,6 +43,10 @@ data ChaseConfig = ChaseConfig
   , cfgAnnotations :: Map Text ModuleAnnotations
   , cfgTestRoots   :: [FilePath]
   , cfgVerbose     :: Bool
+  , cfgDerive      :: Bool
+  -- ^ run the derive pass: clause, fails and literal lines, constant
+  -- candidates, abstract types, callers, derived transitions and the
+  -- checks of %topology and consumes against them
   }
 
 defaultConfig :: ChaseConfig
@@ -52,16 +57,66 @@ defaultConfig = ChaseConfig
   , cfgAnnotations = Map.empty
   , cfgTestRoots   = []
   , cfgVerbose     = False
+  , cfgDerive      = True
+  }
+
+-- | One source file after parsing.
+data Item
+  = ItemFailed FilePath Text
+  | ItemOk FilePath Parsed
+
+-- | Everything the per-file passes need that is known only once every
+-- file has been parsed.
+data RunContext = RunContext
+  { rcTestIndex  :: Coverage.TestRefIndex
+  , rcCallers    :: Maybe Callers.CallerIndex
+  , rcTopologies :: [DerivedTopology]
+  , rcConMap     :: ConMap
   }
 
 runChase :: ChaseConfig -> IO ()
 runChase cfg = do
   testIdx <- buildTestIndexOrEmpty cfg
+  items   <- parseAll cfg
+  let oks     = [ p | ItemOk _ p <- items ]
+      conMap  = buildConMap oks
+      derived = [ parsedDerive p conMap | p <- oks ]
+      tops    = if cfgDerive cfg then mergeTopologies oks derived else []
+  callers <-
+    if cfgDerive cfg
+      then Just <$> Callers.buildCallerIndex
+             (cfgVerbose cfg)
+             Callers.ScanPlan
+               { Callers.spRoots  = cfgSourceRoots cfg
+               , Callers.spSource = "the run's source roots"
+               }
+      else pure Nothing
+  let ctx = RunContext
+        { rcTestIndex  = testIdx
+        , rcCallers    = callers
+        , rcTopologies = tops
+        , rcConMap     = conMap
+        }
   parsed <- case cfgBundleFile cfg of
-    Nothing     -> runPerFile  cfg testIdx
-    Just bundle -> runBundled  cfg bundle testIdx
+    Nothing     -> runPerFile  cfg ctx items
+    Just bundle -> runBundled  cfg ctx items bundle
   forM_ (unmatchedAnnotations (cfgAnnotations cfg) parsed) \w ->
     putStrLn $ "  drift: " <> T.unpack w
+
+-- | Parse every file under the source roots once. Failures are reported
+-- here and carried as items so the bundle can hold a block for them.
+parseAll :: ChaseConfig -> IO [Item]
+parseAll ChaseConfig{..} = do
+  files <- concat <$> mapM findSourceFiles cfgSourceRoots
+  forM files \src -> do
+    when cfgVerbose $ putStrLn $ "parse  " <> src
+    result <- parseSourceFileFull src
+    case result of
+      Left ParseFailure{..} -> do
+        putStrLn $ "WARN: parse failed for " <> pfPath
+        TIO.putStrLn $ "  " <> pfMsg
+        pure (ItemFailed src pfMsg)
+      Right p -> pure (ItemOk src p)
 
 -- | Annotated modules that no parsed file defines: renamed or deleted
 -- modules whose annotations would otherwise stay in the file and attach to
@@ -103,79 +158,73 @@ buildTestIndexOrEmpty ChaseConfig{..}
         putStrLn ""
       pure idx
 
--- | Writes one .chase per source file. Returns the modules parsed, and
--- likewise for 'runBundled'.
-runPerFile :: ChaseConfig -> Coverage.TestRefIndex -> IO (Set Text)
-runPerFile ChaseConfig{..} testIdx = do
+-- | The merged file and its drift warnings, for one parsed item.
+finishFile :: ChaseConfig -> RunContext -> Parsed -> (ChaseFile, [Text])
+finishFile ChaseConfig{..} RunContext{..} p =
+  let structural = parsedFile p
+      withDerived =
+        if cfgDerive
+          then structural { chaseDerived = Just (parsedDerive p rcConMap) }
+          else structural
+      withAnn  = attachAnnotations cfgAnnotations withDerived
+      withCov  = if null cfgTestRoots then withAnn else Coverage.attachCoverage rcTestIndex withAnn
+      merged   = case rcCallers of
+        Just idx -> attachCallers idx withCov
+        Nothing  -> withCov
+      drift    =
+           checkAnnotationDrift merged
+        <> (if cfgDerive then checkTopologyDrift rcTopologies merged else [])
+        <> maybe [] (`checkConsumesDrift` merged) rcCallers
+  in (merged, drift)
+
+-- | Writes one .chase per source file, plus DERIVED.chase for the
+-- run-wide transitions when there are any. Returns the modules parsed,
+-- and likewise for 'runBundled'.
+runPerFile :: ChaseConfig -> RunContext -> [Item] -> IO (Set Text)
+runPerFile cfg@ChaseConfig{..} ctx items = do
   createDirectoryIfMissing True cfgOutputDir
-  files <- concat <$> mapM findSourceFiles cfgSourceRoots
-  fmap (Set.fromList . concat) . forM files $ \src -> do
-    when cfgVerbose $ putStrLn $ "parse  " <> src
-    result <- parseSourceFile src
-    case result of
-      Left ParseFailure{..} -> do
-        putStrLn $ "WARN: parse failed for " <> pfPath
-        TIO.putStrLn $ "  " <> pfMsg
-        pure []
-      Right structural -> do
-        let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
-            outPath  = mkOutputPath cfgOutputDir cfgSourceRoots src
-            rendered = renderChaseFile merged
-            drift    = checkAnnotationDrift merged
-        forM_ drift \w ->
-          putStrLn $ "  drift: " <> T.unpack w
-        createDirectoryIfMissing True (takeDirectory outPath)
-        TIO.writeFile outPath rendered
-        when cfgVerbose $ putStrLn $ "write  " <> outPath
-        pure [chaseModuleName structural]
+  parsed <- fmap (Set.fromList . concat) . forM items $ \case
+    ItemFailed _ _ -> pure []
+    ItemOk src p -> do
+      let (merged, drift) = finishFile cfg ctx p
+          outPath  = mkOutputPath cfgOutputDir cfgSourceRoots src
+          rendered = renderChaseFile merged
+      forM_ drift \w ->
+        putStrLn $ "  drift: " <> T.unpack w
+      createDirectoryIfMissing True (takeDirectory outPath)
+      TIO.writeFile outPath rendered
+      when cfgVerbose $ putStrLn $ "write  " <> outPath
+      pure [chaseModuleName merged]
+  let tail' = renderDerivedTopologies (rcTopologies ctx)
+  when (not (T.null tail')) $ do
+    let derivedPath = cfgOutputDir </> "DERIVED.chase"
+    TIO.writeFile derivedPath tail'
+    when cfgVerbose $ putStrLn $ "write  " <> derivedPath
+  pure parsed
 
-runBundled :: ChaseConfig -> FilePath -> Coverage.TestRefIndex -> IO (Set Text)
-runBundled ChaseConfig{..} bundlePath testIdx = do
+runBundled :: ChaseConfig -> RunContext -> [Item] -> FilePath -> IO (Set Text)
+runBundled cfg@ChaseConfig{..} ctx items bundlePath = do
   createDirectoryIfMissing True (takeDirectory bundlePath)
-  files <- concat <$> mapM findSourceFiles cfgSourceRoots
-  failuresRef  <- newIORef (0 :: Int)
-  successesRef <- newIORef (0 :: Int)
-  parsedRef    <- newIORef Set.empty
-  blocks       <- forM files \src -> do
-    when cfgVerbose $ putStrLn $ "parse  " <> src
-    result <- parseSourceFile src
-    case result of
-      Left ParseFailure{..} -> do
-        modifyIORef' failuresRef (+ 1)
-        putStrLn $ "WARN: parse failed for " <> pfPath
-        TIO.putStrLn $ "  " <> pfMsg
-        pure (renderFailureBlock cfgSourceRoots src pfMsg)
-      Right structural -> do
-        modifyIORef' successesRef (+ 1)
-        modifyIORef' parsedRef (Set.insert (chaseModuleName structural))
-        let merged   = applyPasses cfgAnnotations cfgTestRoots testIdx structural
-            rendered = renderChaseFile merged
-            drift    = checkAnnotationDrift merged
-        forM_ drift \w ->
-          putStrLn $ "  drift: " <> T.unpack w
-        pure (renderBundleBlock cfgSourceRoots src rendered)
-
-  successes <- readIORef successesRef
-  failures  <- readIORef failuresRef
-  let bundle = renderPreamble cfgSourceRoots successes failures <> T.concat blocks
+  blocks <- forM items \case
+    ItemFailed src msg ->
+      pure (Nothing, renderFailureBlock cfgSourceRoots src msg)
+    ItemOk src p -> do
+      let (merged, drift) = finishFile cfg ctx p
+          rendered = renderChaseFile merged
+      forM_ drift \w ->
+        putStrLn $ "  drift: " <> T.unpack w
+      pure (Just (chaseModuleName merged), renderBundleBlock cfgSourceRoots src rendered)
+  let successes = length [ () | (Just _, _) <- blocks ]
+      failures  = length [ () | (Nothing, _) <- blocks ]
+      bundle = renderPreamble cfgSourceRoots successes failures
+            <> T.concat (map snd blocks)
+            <> renderDerivedTopologies (rcTopologies ctx)
   TIO.writeFile bundlePath bundle
   when cfgVerbose $ do
     putStrLn $ "bundled " <> show successes
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
-  readIORef parsedRef
-
-applyPasses
-  :: Map Text ModuleAnnotations
-  -> [FilePath]
-  -> Coverage.TestRefIndex
-  -> ChaseFile
-  -> ChaseFile
-applyPasses anns testRoots testIdx cf =
-  let withAnn = attachAnnotations anns cf
-  in if null testRoots
-       then withAnn
-       else Coverage.attachCoverage testIdx withAnn
+  pure (Set.fromList [ m | (Just m, _) <- blocks ])
 
 -- | The bundle's header. Nothing in it depends on when chase ran, so the
 -- same sources, annotations and test roots give the same bytes. A
@@ -194,14 +243,32 @@ renderPreamble roots ok failed =
     , "# Haskell and PureScript source files concatenated into one document."
     , "# Each block begins with === BEGIN <path> === on its own line."
     , "# Blocks contain the rendered .chase format: %file, %mod, %lang,"
-    , "# %ext (Haskell only), %fixity, %uses, %const, %topology, data decls,"
-    , "# %foreign (PureScript only), %pattern, type signatures with"
-    , "# attached invariants and consumers, ? tested-by lines (when test"
-    , "# coverage analysis was enabled), %decision blocks, %open_issue"
-    , "# blocks (known problems with blocking/affects targets), and parse"
-    , "# errors. Function bodies are deliberately omitted; the lines"
-    , "# beginning with ! after a signature are the behavioral facts you"
-    , "# would otherwise have to infer from reading the source."
+    , "# %ext (Haskell only), %fixity, %uses, %const, %const_candidate,"
+    , "# %topology, %abstract, data decls, %foreign (PureScript only),"
+    , "# %pattern, type signatures with attached lines, %decision blocks,"
+    , "# %open_issue blocks (known problems with blocking/affects targets),"
+    , "# and parse errors. Function bodies are deliberately omitted."
+    , "#"
+    , "# Lines under a signature, by sigil:"
+    , "#   !  a hand-written invariant: a behavioral fact the type does not carry"
+    , "#   >  a hand-written consumer of the function or its side effects"
+    , "#   ~  a fact read from the parsed body by chase itself. These are"
+    , "#      may-facts: a clause may be unreachable, a failure may be on a"
+    , "#      dead path, a literal may be harmless, a caller may be test-only."
+    , "#      clause: the constructor or literal patterns and guards of one clause"
+    , "#      fails: error constructors or strings raised under throwError,"
+    , "#        throwIO, throwM, throw, throwE, Left, fail, error, exitWith"
+    , "#      literals: literals in the body other than 0, 1 and \"\""
+    , "#      called by: functions in the scanned roots that reference this one"
+    , "#   ?  test functions that reference the name (when test roots were scanned)"
+    , "#"
+    , "# %abstract names a data type exported without all its constructors and"
+    , "# the exported functions that return it: build values of it through"
+    , "# those functions, since the constructors are not reachable from outside."
+    , "# %const_candidate is a zero-argument literal binding with no %const note."
+    , "# A === DERIVED TRANSITIONS === block at the end lists, per sum type,"
+    , "# the constructor-to-constructor edges found in clauses and case"
+    , "# alternatives, each with the function that witnesses it."
     , ""
     ]
 
@@ -257,6 +324,10 @@ attachAnnotations annMap cf =
 -- "should read database configuration from environment variables", for
 -- functions whose bodies are in the file. Both failures are mechanical
 -- and neither was visible to the checker as it stood.
+--
+-- The derive pass adds its own checks in Chase.Derive (topology edges
+-- against derived edges, consumes against callers); the pipeline runs
+-- them next to these.
 checkAnnotationDrift :: ChaseFile -> [Text]
 checkAnnotationDrift ChaseFile{..} =
   let sigsByName =

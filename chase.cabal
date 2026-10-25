@@ -158,6 +158,8 @@ library
     Chase
     Chase.Coverage
     Chase.Callers
+    Chase.Derive
+    Chase.Derive.Haskell
     Chase.Parse
     Chase.Parse.Haskell
     Chase.Parse.Imports
@@ -289,24 +291,4 @@ executable chase-unison
 -- ------------------------------------------------------------------
 -- chase-probes test suite
 --
--- Probes from chase.allium (U1 to U5): the Unison renderer, the
--- annotation loader, bundle reproducibility, source discovery and
--- coverage resolution. Each asserts what the spec requires, so a failure
--- is evidence for the matching issue.
--- ------------------------------------------------------------------
-
-test-suite chase-probes
-  import:           warnings
-  type:             exitcode-stdio-1.0
-  hs-source-dirs:   test
-  main-is:          Probe.hs
-  build-depends:
-    , base
-    , bytestring
-    , chase
-    , chase:chase-annotations
-    , chase:chase-codebase
-    , containers
-    , directory
-    , filepath
-    , text
+-- Probes from chase.allium (U1

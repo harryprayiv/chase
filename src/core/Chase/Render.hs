@@ -3,6 +3,7 @@
 
 module Chase.Render
   ( renderChaseFile
+  , renderDerivedTopologies
   ) where
 
 import qualified Data.Text as T
@@ -11,17 +12,19 @@ import Data.Text (Text)
 import Chase.Types
 
 renderChaseFile :: ChaseFile -> Text
-renderChaseFile ChaseFile{..} = T.unlines $
+renderChaseFile cf@ChaseFile{..} = T.unlines $
      header
   <> renderExtensions chaseExtensions
   <> renderFixities   chaseFixities
   <> renderImports    chaseImports
   <> renderConstants  chaseConstants
+  <> renderConstCandidates cf
   <> renderTopologies chaseTopologies
+  <> renderAbstract   chaseDerived
   <> renderDataDecls  chaseDataDecls
-  <> renderForeignImports chaseForeignImports chaseInvariants chaseTestCoverage
-  <> renderPatternsWithInvariants chasePatterns chaseInvariants chaseTestCoverage
-  <> renderSignaturesWithInvariants chaseSignatures chaseInvariants chaseTestCoverage
+  <> renderForeignImports chaseForeignImports extras
+  <> renderPatternsWithInvariants chasePatterns extras
+  <> renderSignaturesWithInvariants chaseSignatures extras
   <> renderDecisions  chaseDecisions
   <> renderOpenIssues chaseOpenIssues
   <> renderParseErrors chaseParseErrors
@@ -31,6 +34,20 @@ renderChaseFile ChaseFile{..} = T.unlines $
       , "%mod "  <> chaseModuleName
       , ""
       ]
+    extras = SigExtras
+      { seInvariants = [(invFunction i, i) | i <- chaseInvariants]
+      , seCoverage   = chaseTestCoverage
+      , seCallers    = chaseCallers
+      , seDerived    = chaseDerived
+      }
+
+-- | Everything that hangs off a name under its signature.
+data SigExtras = SigExtras
+  { seInvariants :: [(Text, Invariant)]
+  , seCoverage   :: Maybe [(Text, [TestRef])]
+  , seCallers    :: Maybe [(Text, [TestRef])]
+  , seDerived    :: Maybe Derived
+  }
 
 renderExtensions :: [Text] -> [Text]
 renderExtensions [] = []
@@ -67,16 +84,41 @@ renderConstants cs = map renderOne cs <> [""]
     renderNote (Note t)    = t
     renderNote (BugNote t) = "BUG: " <> t
 
+-- | Zero-argument literal bindings the annotation file does not name.
+renderConstCandidates :: ChaseFile -> [Text]
+renderConstCandidates ChaseFile{..} =
+  case chaseDerived of
+    Nothing -> []
+    Just d  ->
+      let cands = [ (n, v) | (n, v) <- derConstCands d
+                           , n `notElem` map constName chaseConstants ]
+      in if null cands
+           then []
+           else [ "%const_candidate " <> n <> " = " <> v | (n, v) <- cands ] <> [""]
+
 renderTopologies :: [Topology] -> [Text]
 renderTopologies [] = []
 renderTopologies tops = concatMap renderOne tops <> [""]
   where
     renderOne Topology{..} =
       ( "%machine " <> topName
-        <> " vertices=" <> T.intercalate "," topVertices )
+        <> " vertices=" <> T.intercalate "," topVertices
+        <> (if null topTerminal then "" else " terminal=" <> T.intercalate "," topTerminal) )
       : [ "%topology " <> from <> " -> {" <> T.intercalate ", " tos <> "}"
         | (from, tos) <- topTransitions
         ]
+
+renderAbstract :: Maybe Derived -> [Text]
+renderAbstract Nothing = []
+renderAbstract (Just d) = case derAbstract d of
+  [] -> []
+  as -> map one as <> [""]
+  where
+    one AbstractType{..} =
+      "%abstract " <> atName
+        <> "  hidden: " <> T.intercalate ", " atHidden
+        <> (if null atMakers then "  made by: no exported function returns it"
+                             else "  made by: " <> T.intercalate ", " atMakers)
 
 renderDataDecls :: [ChaseDataDecl] -> [Text]
 renderDataDecls [] = []
@@ -84,67 +126,59 @@ renderDataDecls ds = concatMap one ds
   where
     one ChaseDataDecl{..} = [cddVerbatim, ""]
 
-renderForeignImports
-  :: [Signature]
-  -> [Invariant]
-  -> Maybe [(Text, [TestRef])]
-  -> [Text]
-renderForeignImports [] _ _ = []
-renderForeignImports sigs invs mcov =
-  "%foreign" : concatMap (renderSig invMap mcov) sigs
-  where
-    invMap = [(invFunction i, i) | i <- invs]
+renderForeignImports :: [Signature] -> SigExtras -> [Text]
+renderForeignImports [] _ = []
+renderForeignImports sigs extras =
+  "%foreign" : concatMap (renderSig extras) sigs
 
-renderPatternsWithInvariants
-  :: [Pattern]
-  -> [Invariant]
-  -> Maybe [(Text, [TestRef])]
-  -> [Text]
-renderPatternsWithInvariants [] _ _ = []
-renderPatternsWithInvariants pats invs mcov =
+renderPatternsWithInvariants :: [Pattern] -> SigExtras -> [Text]
+renderPatternsWithInvariants [] _ = []
+renderPatternsWithInvariants pats extras =
   concatMap renderPat pats
   where
-    invMap = [(invFunction i, i) | i <- invs]
     renderPat Pattern{..} =
-      let attached = lookup patName invMap
-          extra = case attached of
-            Nothing -> []
-            Just Invariant{..} ->
-                 [ "  ! " <> l                | l <- invLines    ]
-              <> [ "  > consumed by: " <> c   | c <- invConsumes ]
-              <> case invBodyHint of
-                   Nothing -> []
-                   Just h  -> ["  " <> h]
-          covLine = renderCoverage patName mcov
-      in [patVerbatim] <> extra <> covLine <> [""]
+      [patVerbatim] <> extraLines extras patName <> [""]
 
-renderSignaturesWithInvariants
-  :: [Signature]
-  -> [Invariant]
-  -> Maybe [(Text, [TestRef])]
-  -> [Text]
-renderSignaturesWithInvariants sigs invs mcov =
-  concatMap (renderSig invMap mcov) sigs
+renderSignaturesWithInvariants :: [Signature] -> SigExtras -> [Text]
+renderSignaturesWithInvariants sigs extras =
+  concatMap (renderSig extras) sigs
+
+renderSig :: SigExtras -> Signature -> [Text]
+renderSig extras Signature{..} =
+  [sigVerbatim] <> extraLines extras sigName <> [""]
+
+-- | The lines under one name, in a fixed order: hand-written invariants
+-- and consumers, then derived facts, then callers, then coverage.
+extraLines :: SigExtras -> Text -> [Text]
+extraLines SigExtras{..} name =
+     invariantLines
+  <> derivedLines
+  <> callerLines
+  <> renderCoverage name seCoverage
   where
-    invMap = [(invFunction i, i) | i <- invs]
-
-renderSig
-  :: [(Text, Invariant)]
-  -> Maybe [(Text, [TestRef])]
-  -> Signature
-  -> [Text]
-renderSig invMap mcov Signature{..} =
-  let attached = lookup sigName invMap
-      extra = case attached of
-        Nothing -> []
-        Just Invariant{..} ->
-             [ "  ! " <> l                | l <- invLines    ]
-          <> [ "  > consumed by: " <> c   | c <- invConsumes ]
-          <> case invBodyHint of
-               Nothing -> []
-               Just h  -> ["  " <> h]
-      covLine = renderCoverage sigName mcov
-  in [sigVerbatim] <> extra <> covLine <> [""]
+    invariantLines = case lookup name seInvariants of
+      Nothing -> []
+      Just Invariant{..} ->
+           [ "  ! " <> l              | l <- invLines    ]
+        <> [ "  > consumed by: " <> c | c <- invConsumes ]
+        <> case invBodyHint of
+             Nothing -> []
+             Just h  -> ["  " <> h]
+    derivedLines = case seDerived of
+      Nothing -> []
+      Just d  ->
+           [ "  ~ clause: " <> c   | c <- lookupAll name (derClauses d) ]
+        <> [ "  ~ fails: " <> T.intercalate ", " fs
+           | let fs = lookupAll name (derFails d), not (null fs) ]
+        <> [ "  ~ literals: " <> T.intercalate ", " ls
+           | let ls = lookupAll name (derLiterals d), not (null ls) ]
+    callerLines = case seCallers of
+      Nothing -> []
+      Just cs -> case lookup name cs of
+        Nothing   -> []
+        Just []   -> ["  ~ no callers in scanned roots"]
+        Just refs -> ["  ~ called by: " <> T.intercalate ", " (map renderTestRef refs)]
+    lookupAll k kvs = concat [ v | (k', v) <- kvs, k' == k ]
 
 renderCoverage :: Text -> Maybe [(Text, [TestRef])] -> [Text]
 renderCoverage _    Nothing       = []
@@ -190,3 +224,28 @@ renderOpenIssues is = concatMap one is
 renderParseErrors :: [Text] -> [Text]
 renderParseErrors [] = []
 renderParseErrors es = "" : [ "%parse_error " <> e | e <- es ]
+
+-- | The run-wide derived transitions: one block per sum type that has
+-- any, each edge with the clause that witnesses it. "*" on the left is a
+-- clause that builds the constructor without matching one of the type.
+renderDerivedTopologies :: [DerivedTopology] -> Text
+renderDerivedTopologies [] = ""
+renderDerivedTopologies tops = T.unlines $
+  [ ""
+  , "=== DERIVED TRANSITIONS ==="
+  , ""
+  , "# Edges read from clauses and case alternatives: a clause that matches"
+  , "# constructor A of a sum type and builds constructor B of the same type"
+  , "# gives A -> B. These are may-edges from syntax, not proof that the"
+  , "# transition is reachable. %topology annotations are checked against"
+  , "# them; the warnings are printed by the run, not written here."
+  , ""
+  ] <> concatMap one tops
+  where
+    one DerivedTopology{..} =
+      ( "%derived " <> dtModule <> "." <> dtType
+          <> " constructors=" <> T.intercalate "," dtConstructors )
+      : [ "  " <> deFrom e <> " -> " <> deTo e <> "  via " <> deWitness e
+        | e <- dtEdges
+        ]
+      <> [""]

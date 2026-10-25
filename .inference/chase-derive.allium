@@ -1,0 +1,339 @@
+-- allium: 3
+-- chase-derive.allium
+--
+-- The derive pass (Phase 0 of the Allium-influenced changes, 2026-10-25):
+-- facts chase reads from parsed bodies, and the checks that hold
+-- hand-written annotations to them. Companion to chase.allium, which
+-- covers everything else about chase. Merge into it once Phase 0 has run
+-- on a real project.
+--
+-- Scope
+--   Includes: the Haskell derive pass over the parsed tree, the run-wide
+--             constructor map, derived transitions, abstract types,
+--             constant candidates, callers from the run's roots, the three
+--             topology checks and the consumes check.
+--   Excludes: name resolution and types (Phase 1, HIE files), compiler
+--             diagnostics (Phase 2), the PureScript derive pass (Phase 4).
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity ChaseRun {
+    roots: List<String>
+    derive_enabled: Boolean
+    skeletons: Skeleton with run = this
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value DerivedEdge {
+    type_name: String
+    from: String
+    to: String
+    witness: String
+}
+
+value AbstractType {
+    name: String
+    hidden: List<String>
+    makers: List<String>
+}
+
+value Edge {
+    from: String
+    to: String
+}
+
+value TopologyAnnotation {
+    name: String
+    vertices: List<String>
+    edges: List<Edge>
+    terminal: List<String>
+}
+
+value SumType {
+    module_name: String
+    type_name: String
+    constructors: List<String>
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Language { haskell | purescript }
+
+enum Thrower { throwError | throwIO | throwM | throw | throwE | left | fail | error | exitWith }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Skeleton {
+    run: ChaseRun
+    module_name: String
+    language: Language
+    signatures: List<String>
+    sum_types: List<SumType>
+    topologies: List<TopologyAnnotation>
+    derived: Derived with skeleton = this
+    rendered: Boolean
+}
+
+entity Derived {
+    skeleton: Skeleton
+    clauses: Map<String, List<String>>
+    fails: Map<String, List<String>>
+    literals: Map<String, List<String>>
+    const_candidates: Map<String, String>
+    edges: List<DerivedEdge>
+    abstract: List<AbstractType>
+    callers: Map<String, List<String>>
+}
+
+entity ConstructorMap {
+    run: ChaseRun
+    entries: Map<String, Set<SumType>>
+}
+
+entity Warning {
+    skeleton: Skeleton
+    text: String
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+rule BuildConstructorMap {
+    when: AllFilesParsed(run)
+    requires: run.derive_enabled
+    ensures:
+        let map = ConstructorMap.created(run: run)
+        for s in run.skeletons:
+            for t in s.sum_types:
+                for c in t.constructors:
+                    map.entries[c].add(t)
+
+    @guidance
+        -- Every file is parsed before any file is derived, so a type
+        -- declared in one module and transitioned in another is covered.
+        -- Each file is parsed once; the derive is a closure over the tree,
+        -- applied after the map exists.
+}
+
+rule DeriveHaskellModule {
+    when: skeleton: Skeleton.created
+    requires: skeleton.language = haskell
+    requires: skeleton.run.derive_enabled
+    ensures:
+        let d = Derived.created(skeleton: skeleton)
+        for f in skeleton.signatures:
+            d.clauses[f] = clause_lines(f)
+            d.fails[f] = failure_names(f)
+            d.literals[f] = body_literals(f)
+        d.const_candidates = literal_bindings(skeleton)
+        d.abstract = hidden_constructor_types(skeleton)
+
+    @guidance
+        -- clause_lines: one line per clause of f that has a constructor
+        -- or literal pattern or a guard other than otherwise, written as
+        -- "pats | guard, guard".
+        -- failure_names: the constructors and string literals that are
+        -- the argument of a Thrower in f's body, applied directly or
+        -- through $.
+        -- body_literals: the literals in f's body other than 0, 1 and "",
+        -- capped at twelve with a count of the rest.
+        -- literal_bindings: every zero-argument top-level binding with one
+        -- unguarded clause whose body is a literal, possibly negated.
+        -- hidden_constructor_types: every data declaration the export list
+        -- names without all its constructors, with the exported functions
+        -- whose result type names it.
+}
+
+rule DeriveEdges {
+    when: derived: Derived.created
+    let map = ConstructorMap{run: derived.skeleton.run}
+    ensures:
+        for site in clause_sites(derived.skeleton):
+            for b in built_constructors(site):
+                for t in map.entries[b]:
+                    let matched = matched_constructors(site) where t in map.entries[this]
+                    if matched.count = 0:
+                        derived.edges.add(DerivedEdge(t, "*", b, site.witness))
+                    else:
+                        for a in matched:
+                            derived.edges.add(DerivedEdge(t, a, b, site.witness))
+
+    @guidance
+        -- clause_sites: every top-level clause and every case alternative
+        -- inside one. A site's witness is "Module.function" of the
+        -- enclosing top-level binding.
+        -- An edge is drawn only between constructors of one type. A site
+        -- that builds a constructor without matching one of that type gets
+        -- "*" on the left; initial states, parsers and decoders look like
+        -- that.
+}
+
+rule AttachCallers {
+    when: skeleton: Skeleton.created
+    requires: skeleton.run.derive_enabled
+    let index = caller_index(skeleton.run.roots)
+    ensures:
+        for n in skeleton.signatures:
+            skeleton.derived.callers[n] = index[skeleton.module_name, n]
+
+    @guidance
+        -- The index resolves references through each file's imports, the
+        -- same rule coverage uses (chase.allium ResolveReference), and
+        -- leaves out the binding's own definition site. The scan is over
+        -- the run's roots as given, not the .cabal hs-source-dirs that
+        -- chase-annotate's callers use, so a run over one directory of
+        -- several reports callers from that directory only.
+}
+
+rule RenderDerived {
+    when: skeleton: Skeleton.rendered becomes true
+    requires: exists skeleton.derived
+    ensures:
+        Rendered(skeleton: skeleton, derived: skeleton.derived)
+
+    @guidance
+        -- Under each signature, after the ! and > lines and before the ?
+        -- line: ~ clause, ~ fails, ~ literals, then ~ called by or
+        -- ~ no callers in scanned roots.
+        -- %const_candidate lines follow %const, for candidates whose name
+        -- has no %const annotation.
+        -- %abstract lines precede the data declarations.
+        -- In bundle mode one DERIVED TRANSITIONS block ends the bundle,
+        -- listing every type that has edges; in per-file mode the same
+        -- block is DERIVED.chase.
+        -- The preamble explains the ~ sigil as a may-fact.
+}
+
+rule CheckTopologyWitnesses {
+    when: skeleton: Skeleton.rendered becomes true
+    requires: skeleton.run.derive_enabled
+    for top in skeleton.topologies:
+        let candidates = skeleton.run's sum types where top.vertices all in constructors
+        requires: candidates.count >= 1
+        let t = candidates.first
+        let edges = DerivedEdges where type_name = t.type_name
+        ensures:
+            for e in top.edges:
+                if not edges.any(d => d.to = e.to and (d.from = e.from or d.from = "*")):
+                    Warning.created(skeleton: skeleton,
+                        text: "edge has no witness: no clause matches from and builds to")
+            for d in edges:
+                if d.from != "*" and d.from != d.to
+                        and d.from in top.vertices and d.to in top.vertices
+                        and not top.edges.any(e => e.from = d.from and e.to = d.to):
+                    Warning.created(skeleton: skeleton,
+                        text: "witness builds to from from, an edge the topology does not declare")
+
+    @guidance
+        -- The two obligations an Allium transition graph carries, with
+        -- clauses standing in for rules: every declared edge is witnessed,
+        -- and a witnessed edge is declared. Both are warnings because the
+        -- derived edges are may-edges read from syntax.
+}
+
+rule CheckTopologyUnmatched {
+    when: skeleton: Skeleton.rendered becomes true
+    requires: skeleton.run.derive_enabled
+    for top in skeleton.topologies:
+        requires: not exists sum type whose constructors contain all of top.vertices
+        ensures:
+            Warning.created(skeleton: skeleton,
+                text: "vertices name no constructor set in the parsed sources; nothing to check against")
+}
+
+rule CheckTopologyExits {
+    when: skeleton: Skeleton.rendered becomes true
+    requires: skeleton.run.derive_enabled
+    for top in skeleton.topologies:
+        requires: top.terminal.count >= 1
+        ensures:
+            for v in top.vertices:
+                if v not in top.terminal and not top.edges.any(e => e.from = v):
+                    Warning.created(skeleton: skeleton,
+                        text: "state is not listed as terminal and has no outbound edge")
+
+    @guidance
+        -- The third obligation of a transition graph. The terminal list is
+        -- optional in the JSON; without it this check is skipped rather
+        -- than guessed, since absence of outbound edges does not mean a
+        -- state is terminal.
+}
+
+rule CheckConsumesAgainstCallers {
+    when: skeleton: Skeleton.rendered becomes true
+    requires: exists skeleton.derived
+    ensures:
+        for i in skeleton.invariants:
+            for c in i.consumes:
+                let token = first_word(c)
+                if is_qualified_function(token)
+                        and token not in skeleton.derived.callers[i.function]:
+                    Warning.created(skeleton: skeleton,
+                        text: "consumes entry is not among the function's callers in the scanned roots")
+
+    @guidance
+        -- is_qualified_function: one or more capitalised module parts
+        -- followed by a lower-case name, Server.Auth.loginHandler. consumes
+        -- is wider than the call graph (a column read, a late subscriber),
+        -- so entries that do not start that way are not checked.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant DerivedIsDeterministic {
+    for s in Skeletons:
+        derive(s) = derive(s)
+}
+
+invariant DerivedNeverRemovesHandWrittenLines {
+    for s in Skeletons:
+        hand_written_lines(render(s, with_derive)) = hand_written_lines(render(s, without_derive))
+}
+
+invariant EdgesStayWithinOneType {
+    for e in DerivedEdges:
+        e.from = "*" or (e.from in constructors_of(e.type_name) and e.to in constructors_of(e.type_name))
+}
+
+invariant DeriveOffIsTheOldOutput {
+    for r in ChaseRuns:
+        not r.derive_enabled implies bundle_bytes(r) = bundle_bytes_before_phase_0(r)
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred clause_lines(function)
+deferred failure_names(function)
+deferred body_literals(function)
+deferred literal_bindings(skeleton)
+deferred hidden_constructor_types(skeleton)
+deferred clause_sites(skeleton)
+deferred matched_constructors(site)
+deferred built_constructors(site)
+deferred caller_index(roots)
+deferred first_word(text)
+deferred is_qualified_function(token)
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "A clause that matches constructor A and calls show B produces the edge A -> B. Should built constructors be limited to return positions, which is tractable syntactically but misses constructors passed to a state-setting function?"
+
+open question "The caller index parses every source file a second time. Should the derive closure also expose the bindings and references so the index comes from the first parse?"
+
+open question "PureScript has the same clause, failure and transition shapes in its CST. Is the Phase 0 pass worth porting before Phase 4 (CoreFn) exists, or does CoreFn make the syntactic pass redundant on that side?"

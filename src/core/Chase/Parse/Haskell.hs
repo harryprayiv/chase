@@ -3,6 +3,7 @@
 
 module Chase.Parse.Haskell
   ( parseSourceFile
+  , parseSourceFileFull
   , parseHsModule
   , moduleNameOf
   , importInfosOf
@@ -42,6 +43,8 @@ import Language.Haskell.Syntax.Module.Name (moduleNameString)
 import GHC.Utils.Outputable      (ppr, showSDocUnsafe)
 
 import Chase.Types
+import Chase.Derive          (Parsed (..))
+import Chase.Derive.Haskell  (deriveHaskell, sumTypesOf)
 import Chase.Parse.Imports (ImportInfo (..), ImportNames (..))
 
 -- | Raw parse: returns the source text and the AST so other passes
@@ -62,13 +65,25 @@ parseHsModule path = do
     PFailed pst ->
       pure $ Left $ ParseFailure path (renderParseError pst)
 
+-- | The skeleton alone, for callers that do not run the derive pass.
 parseSourceFile :: FilePath -> IO (Either ParseFailure ChaseFile)
-parseSourceFile path = do
+parseSourceFile path = fmap parsedFile <$> parseSourceFileFull path
+
+-- | The skeleton, the module's sum types, and the derive pass as a
+-- function of the run-wide constructor map. The AST is held in the
+-- closure, so the file is parsed once.
+parseSourceFileFull :: FilePath -> IO (Either ParseFailure Parsed)
+parseSourceFileFull path = do
   result <- parseHsModule path
   pure $ case result of
     Left pf -> Left pf
     Right (sourceText, hsmod) ->
-      Right $ extractStructure path sourceText (T.lines sourceText) hsmod
+      let cf = extractStructure path sourceText (T.lines sourceText) hsmod
+      in Right Parsed
+           { parsedFile     = cf
+           , parsedSumTypes = sumTypesOf hsmod
+           , parsedDerive   = deriveHaskell (chaseModuleName cf) (chaseSignatures cf) hsmod
+           }
 
 
 -- | If the source declares LANGUAGE CPP, replace each line that begins

@@ -25,6 +25,11 @@ module Chase.Types
   , openIssue
   , Topology (..)
   , TestRef (..)
+  , Derived (..)
+  , emptyDerived
+  , DerivedEdge (..)
+  , DerivedTopology (..)
+  , AbstractType (..)
   ) where
 
 import Data.Text (Text)
@@ -57,6 +62,12 @@ data ChaseFile = ChaseFile
   , chaseTopologies     :: [Topology]
   , chaseParseErrors    :: [Text]
   , chaseTestCoverage   :: Maybe [(Text, [TestRef])]
+  , chaseCallers        :: Maybe [(Text, [TestRef])]
+  -- ^ callers of each signature, foreign import and pattern, from the
+  -- run's own source roots; Nothing when the derive pass is off
+  , chaseDerived        :: Maybe Derived
+  -- ^ facts read from the parsed bodies; Nothing when the derive pass is
+  -- off or the language backend has no derive pass yet
   }
   deriving stock (Show, Generic)
 
@@ -79,6 +90,8 @@ emptyChaseFile lang path = ChaseFile
   , chaseTopologies     = []
   , chaseParseErrors    = []
   , chaseTestCoverage   = Nothing
+  , chaseCallers        = Nothing
+  , chaseDerived        = Nothing
   }
 
 data Signature = Signature
@@ -175,10 +188,16 @@ data OpenIssue = OpenIssue
 openIssue :: Text -> Text -> Text -> [Text] -> [Text] -> OpenIssue
 openIssue = OpenIssue
 
+-- | A hand-written state machine. 'topTerminal' lists the vertices that
+-- are allowed to have no outbound edge; a vertex outside that list with
+-- no outbound edge is reported by the derive pass. An empty list means
+-- the author has not said which states are terminal, and that check is
+-- skipped for the topology.
 data Topology = Topology
   { topName        :: Text
   , topVertices    :: [Text]
   , topTransitions :: [(Text, [Text])]
+  , topTerminal    :: [Text]
   }
   deriving stock (Show, Generic)
 
@@ -190,5 +209,62 @@ data TestRef = TestRef
   { trModule   :: Text
   , trFunction :: Text
   , trSrcLine  :: Int
+  }
+  deriving stock (Show, Generic)
+
+-- | Facts the derive pass reads from one module's parsed bodies. Every
+-- entry is keyed by the top-level function it was found in. These are
+-- may-facts: a clause may be unreachable, a literal may be harmless, an
+-- edge may never fire. The renderer marks them with a ~ sigil so a reader
+-- can tell them from hand-written invariants.
+data Derived = Derived
+  { derClauses    :: [(Text, [Text])]
+  -- ^ per function: one line per clause with a constructor or literal
+  -- pattern or a guard, as "pats | guard, guard"
+  , derFails      :: [(Text, [Text])]
+  -- ^ per function: error constructors and error strings it can raise
+  , derLiterals   :: [(Text, [Text])]
+  -- ^ per function: literals in the body other than 0, 1 and ""
+  , derConstCands :: [(Text, Text)]
+  -- ^ top-level zero-argument bindings whose body is a literal
+  , derEdges      :: [DerivedEdge]
+  -- ^ transitions between constructors of a sum type, found in clauses
+  -- and case alternatives
+  , derAbstract   :: [AbstractType]
+  -- ^ data types exported without their constructors
+  }
+  deriving stock (Show, Generic)
+
+emptyDerived :: Derived
+emptyDerived = Derived [] [] [] [] [] []
+
+-- | A clause or case alternative that matches 'deFrom' and builds 'deTo',
+-- both constructors of 'deType'. 'deFrom' is "*" when the clause matches
+-- no constructor of that type. 'deWitness' is "Module.function".
+data DerivedEdge = DerivedEdge
+  { deType    :: Text
+  , deFrom    :: Text
+  , deTo      :: Text
+  , deWitness :: Text
+  }
+  deriving stock (Show, Eq, Ord, Generic)
+
+-- | All derived edges of one sum type across the whole run, with the
+-- type's constructors so a hand-written topology can be matched to it.
+data DerivedTopology = DerivedTopology
+  { dtType         :: Text
+  , dtModule       :: Text
+  , dtConstructors :: [Text]
+  , dtEdges        :: [DerivedEdge]
+  }
+  deriving stock (Show, Generic)
+
+-- | A data type whose constructors are not all exported. 'atHidden' are
+-- the constructors the export list keeps in; 'atMakers' are the exported
+-- functions of the same module whose result type names the type.
+data AbstractType = AbstractType
+  { atName   :: Text
+  , atHidden :: [Text]
+  , atMakers :: [Text]
   }
   deriving stock (Show, Generic)

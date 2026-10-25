@@ -36,11 +36,15 @@
 -- >       ],
 -- >       "topologies": [
 -- >         { "name": "...", "vertices": ["A","B"],
--- >           "transitions": { "A": ["B"], "B": ["A"] } }
+-- >           "transitions": { "A": ["B"], "B": ["A"] },
+-- >           "terminal": ["B"] }
 -- >       ]
 -- >     }
 -- >   }
 -- > }
+--
+-- "terminal" is optional. When present, the derive pass reports a vertex
+-- outside it that has no outbound edge.
 module Chase.Annotations.Json
   ( loadAnnotations
   , loadAnnotationsIfExists
@@ -285,14 +289,16 @@ parseWhy ctx = \case
 
 parseTopology :: A.Value -> AT.Parser Topology
 parseTopology = A.withObject "topology" $ \o -> do
-  name     <- o A..: "name"
-  vertices <- o A..: "vertices"
-  transObj <- o A..: "transitions"
+  name     <- o A..:  "name"
+  vertices <- o A..:  "vertices"
+  transObj <- o A..:  "transitions"
+  terminal <- o A..:? "terminal" A..!= []
   trans    <- mapM parseTransPair (KM.toList transObj)
   pure Topology
     { topName        = name
     , topVertices    = vertices
     , topTransitions = trans
+    , topTerminal    = terminal
     }
   where
     parseTransPair (k, v) = do
