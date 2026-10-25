@@ -127,6 +127,7 @@ library chase-annotations
   hs-source-dirs:   src/annotations
   default-extensions:
     LambdaCase
+    MultiWayIf
     OverloadedStrings
     ScopedTypeVariables
   exposed-modules:
@@ -144,6 +145,36 @@ library chase-annotations
     , text
 
 -- ------------------------------------------------------------------
+-- chase-hie sublibrary
+--
+-- Reads .hie files with the ghc package, the real compiler library, and
+-- reduces them to a model with no GHC types in it (Chase.Hie). It is
+-- the only component that depends on ghc, and it does not depend on
+-- ghc-lib-parser, so the two sets of GHC.* modules never meet. The GHC
+-- version it reads is the one that builds chase; the flake's compiler
+-- setting chooses it.
+-- ------------------------------------------------------------------
+
+library chase-hie
+  import:           warnings
+  visibility:       public
+  hs-source-dirs:   src/hie
+  default-extensions:
+    LambdaCase
+    MultiWayIf
+    OverloadedStrings
+    ScopedTypeVariables
+  exposed-modules:
+    Chase.Hie
+  build-depends:
+    , base                 >= 4.18    && < 5
+    , containers
+    , directory
+    , filepath
+    , ghc
+    , text
+
+-- ------------------------------------------------------------------
 -- chase library proper (deterministic core, no network deps)
 -- ------------------------------------------------------------------
 
@@ -152,6 +183,7 @@ library
   hs-source-dirs:   src/core
   default-extensions:
     LambdaCase
+    MultiWayIf
     OverloadedStrings
     ScopedTypeVariables
   exposed-modules:
@@ -159,7 +191,9 @@ library
     Chase.Coverage
     Chase.Callers
     Chase.Derive
+    Chase.Derive.GhcLog
     Chase.Derive.Haskell
+    Chase.Derive.Hie
     Chase.Parse
     Chase.Parse.Haskell
     Chase.Parse.Imports
@@ -170,12 +204,14 @@ library
   reexported-modules:
     Chase.Types,
     Chase.Annotations.Json,
-    Chase.Inference
+    Chase.Inference,
+    Chase.Hie
   build-depends:
     , base                 >= 4.18    && < 5
     , aeson                >= 2.0
     , bytestring
     , chase:chase-annotations
+    , chase:chase-hie
     , containers
     , directory
     , filepath
@@ -291,4 +327,24 @@ executable chase-unison
 -- ------------------------------------------------------------------
 -- chase-probes test suite
 --
--- Probes from chase.allium (U1
+-- Probes from chase.allium (U1 to U5): the Unison renderer, the
+-- annotation loader, bundle reproducibility, source discovery and
+-- coverage resolution. Each asserts what the spec requires, so a failure
+-- is evidence for the matching issue.
+-- ------------------------------------------------------------------
+
+test-suite chase-probes
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Probe.hs
+  build-depends:
+    , base
+    , bytestring
+    , chase
+    , chase:chase-annotations
+    , chase:chase-codebase
+    , containers
+    , directory
+    , filepath
+    , text

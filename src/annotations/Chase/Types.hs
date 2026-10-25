@@ -30,6 +30,9 @@ module Chase.Types
   , DerivedEdge (..)
   , DerivedTopology (..)
   , AbstractType (..)
+  , HieFacts (..)
+  , ConstructorUsage (..)
+  , GhcWarning (..)
   ) where
 
 import Data.Text (Text)
@@ -63,11 +66,16 @@ data ChaseFile = ChaseFile
   , chaseParseErrors    :: [Text]
   , chaseTestCoverage   :: Maybe [(Text, [TestRef])]
   , chaseCallers        :: Maybe [(Text, [TestRef])]
-  -- ^ callers of each signature, foreign import and pattern, from the
-  -- run's own source roots; Nothing when the derive pass is off
+  -- ^ callers of each signature, foreign import and pattern; from the
+  -- HIE files when present, else from the run's own source roots by
+  -- import resolution; Nothing when the derive pass is off
   , chaseDerived        :: Maybe Derived
   -- ^ facts read from the parsed bodies; Nothing when the derive pass is
   -- off or the language backend has no derive pass yet
+  , chaseHie            :: Maybe HieFacts
+  -- ^ facts from the module's HIE file; Nothing when there is none
+  , chaseGhcWarnings    :: [GhcWarning]
+  -- ^ the compiler's warnings for this file, from a build log
   }
   deriving stock (Show, Generic)
 
@@ -92,6 +100,8 @@ emptyChaseFile lang path = ChaseFile
   , chaseTestCoverage   = Nothing
   , chaseCallers        = Nothing
   , chaseDerived        = Nothing
+  , chaseHie            = Nothing
+  , chaseGhcWarnings    = []
   }
 
 data Signature = Signature
@@ -268,3 +278,39 @@ data AbstractType = AbstractType
   , atMakers :: [Text]
   }
   deriving stock (Show, Generic)
+
+-- | Facts from one module's HIE file. 'hfUses' is, per binding, the
+-- functions it references that are defined outside the project's
+-- packages and whose type at the use site is effectful, as
+-- "Module.name". 'hfUnreferenced' lists bindings that are not exported
+-- and that no binding in any HIE file references.
+data HieFacts = HieFacts
+  { hfUses         :: [(Text, [Text])]
+  , hfUnreferenced :: [Text]
+  }
+  deriving stock (Show, Generic)
+
+-- | A constructor nothing builds, or a constructor of a multi-constructor
+-- type nothing matches, with the bindings on the other side as
+-- "Module.function".
+data ConstructorUsage = ConstructorUsage
+  { cuModule   :: Text
+  , cuType     :: Text
+  , cuName     :: Text
+  , cuBuilders :: [Text]
+  , cuMatchers :: [Text]
+  }
+  deriving stock (Show, Generic)
+
+-- | One warning from a GHC build log: the file and line it points at,
+-- the -W flag that produced it, its message on one line, and the
+-- signature it was attached to (the nearest one at or above its line),
+-- or Nothing for a warning that precedes every signature of the file.
+data GhcWarning = GhcWarning
+  { gwFile     :: Text
+  , gwLine     :: Int
+  , gwFlag     :: Text
+  , gwMessage  :: Text
+  , gwFunction :: Maybe Text
+  }
+  deriving stock (Show, Eq, Ord, Generic)

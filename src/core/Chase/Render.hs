@@ -4,6 +4,7 @@
 module Chase.Render
   ( renderChaseFile
   , renderDerivedTopologies
+  , renderConstructorUsage
   ) where
 
 import qualified Data.Text as T
@@ -15,12 +16,14 @@ renderChaseFile :: ChaseFile -> Text
 renderChaseFile cf@ChaseFile{..} = T.unlines $
      header
   <> renderExtensions chaseExtensions
+  <> renderModuleWarnings chaseGhcWarnings
   <> renderFixities   chaseFixities
   <> renderImports    chaseImports
   <> renderConstants  chaseConstants
   <> renderConstCandidates cf
   <> renderTopologies chaseTopologies
   <> renderAbstract   chaseDerived
+  <> renderUntested   chaseTestCoverage
   <> renderDataDecls  chaseDataDecls
   <> renderForeignImports chaseForeignImports extras
   <> renderPatternsWithInvariants chasePatterns extras
@@ -39,6 +42,8 @@ renderChaseFile cf@ChaseFile{..} = T.unlines $
       , seCoverage   = chaseTestCoverage
       , seCallers    = chaseCallers
       , seDerived    = chaseDerived
+      , seHie        = chaseHie
+      , seWarnings   = chaseGhcWarnings
       }
 
 -- | Everything that hangs off a name under its signature.
@@ -47,11 +52,29 @@ data SigExtras = SigExtras
   , seCoverage   :: Maybe [(Text, [TestRef])]
   , seCallers    :: Maybe [(Text, [TestRef])]
   , seDerived    :: Maybe Derived
+  , seHie        :: Maybe HieFacts
+  , seWarnings   :: [GhcWarning]
   }
+
+-- | How many callers a ~ called by line names before giving a count.
+callerCap :: Int
+callerCap = 8
+
+-- | How many names an %untested line carries.
+untestedPerLine :: Int
+untestedPerLine = 8
 
 renderExtensions :: [Text] -> [Text]
 renderExtensions [] = []
 renderExtensions xs = ["%ext " <> T.intercalate ", " xs, ""]
+
+-- | Compiler warnings that precede every signature of the file: a
+-- module-level pragma, an import, a data declaration (partial fields).
+renderModuleWarnings :: [GhcWarning] -> [Text]
+renderModuleWarnings ws =
+  case [ w | w <- ws, gwFunction w == Nothing ] of
+    [] -> []
+    ms -> [ "%ghc line " <> T.pack (show (gwLine w)) <> " [-" <> gwFlag w <> "] " <> gwMessage w | w <- ms ] <> [""]
 
 renderFixities :: [Fixity] -> [Text]
 renderFixities [] = []
@@ -120,6 +143,18 @@ renderAbstract (Just d) = case derAbstract d of
         <> (if null atMakers then "  made by: no exported function returns it"
                              else "  made by: " <> T.intercalate ", " atMakers)
 
+-- | The names no test references, a few per line. Replaces one
+-- "? no test references" line under each of them.
+renderUntested :: Maybe [(Text, [TestRef])] -> [Text]
+renderUntested Nothing = []
+renderUntested (Just cov) =
+  case [ n | (n, []) <- cov ] of
+    []    -> []
+    names -> [ "%untested " <> T.intercalate ", " chunk | chunk <- chunksOf untestedPerLine names ] <> [""]
+  where
+    chunksOf _ [] = []
+    chunksOf n xs = let (h, t) = splitAt n xs in h : chunksOf n t
+
 renderDataDecls :: [ChaseDataDecl] -> [Text]
 renderDataDecls [] = []
 renderDataDecls ds = concatMap one ds
@@ -148,11 +183,14 @@ renderSig extras Signature{..} =
   [sigVerbatim] <> extraLines extras sigName <> [""]
 
 -- | The lines under one name, in a fixed order: hand-written invariants
--- and consumers, then derived facts, then callers, then coverage.
+-- and consumers, then facts from the parse, then facts from the HIE
+-- file, then the compiler's warnings, then callers, then coverage.
 extraLines :: SigExtras -> Text -> [Text]
 extraLines SigExtras{..} name =
      invariantLines
   <> derivedLines
+  <> hieLines
+  <> warningLines
   <> callerLines
   <> renderCoverage name seCoverage
   where
@@ -172,20 +210,38 @@ extraLines SigExtras{..} name =
            | let fs = lookupAll name (derFails d), not (null fs) ]
         <> [ "  ~ literals: " <> T.intercalate ", " ls
            | let ls = lookupAll name (derLiterals d), not (null ls) ]
+    hieLines = case seHie of
+      Nothing -> []
+      Just h  ->
+           [ "  ~ uses: " <> T.intercalate ", " us
+           | let us = lookupAll name (hfUses h), not (null us) ]
+        <> [ "  ~ unreferenced: not exported, and nothing in the HIE set references it"
+           | name `elem` hfUnreferenced h ]
+    warningLines =
+      [ "  ~ ghc [-" <> gwFlag w <> "]: " <> gwMessage w
+      | w <- seWarnings
+      , gwFunction w == Just name
+      ]
     callerLines = case seCallers of
       Nothing -> []
       Just cs -> case lookup name cs of
         Nothing   -> []
         Just []   -> ["  ~ no callers in scanned roots"]
-        Just refs -> ["  ~ called by: " <> T.intercalate ", " (map renderTestRef refs)]
+        Just refs ->
+          let shown = map renderTestRef (take callerCap refs)
+              rest  = length refs - callerCap
+              more  = if rest > 0 then [ "+" <> T.pack (show rest) <> " more" ] else []
+          in ["  ~ called by: " <> T.intercalate ", " (shown <> more)]
     lookupAll k kvs = concat [ v | (k', v) <- kvs, k' == k ]
 
+-- | The tests that reference a name. A name with none is listed in the
+-- module's %untested block instead.
 renderCoverage :: Text -> Maybe [(Text, [TestRef])] -> [Text]
 renderCoverage _    Nothing       = []
 renderCoverage name (Just covMap) =
   case lookup name covMap of
     Nothing   -> []
-    Just []   -> ["  ? no test references"]
+    Just []   -> []
     Just refs -> ["  ? tested by: "
                   <> T.intercalate ", " (map renderTestRef refs)]
 
@@ -249,3 +305,28 @@ renderDerivedTopologies tops = T.unlines $
         | e <- dtEdges
         ]
       <> [""]
+
+-- | Constructors nothing builds, and constructors of multi-constructor
+-- types nothing matches, from the HIE files.
+renderConstructorUsage :: [ConstructorUsage] -> Text
+renderConstructorUsage [] = ""
+renderConstructorUsage cus = T.unlines $
+  [ ""
+  , "=== CONSTRUCTOR USAGE ==="
+  , ""
+  , "# From the HIE files, with names resolved. A constructor nothing builds"
+  , "# is a state the program never enters; a constructor of a sum type"
+  , "# nothing matches is a state nothing observes. Instance method bodies"
+  , "# are not attributed to a binding, so a constructor used only inside an"
+  , "# instance appears here."
+  , ""
+  ] <> concatMap one cus
+  where
+    one ConstructorUsage{..} =
+         [ "%never_built " <> cuModule <> "." <> cuName <> " (" <> cuType <> ")"
+             <> (if null cuMatchers then "  matched by: nothing"
+                                    else "  matched by: " <> T.intercalate ", " cuMatchers)
+         | null cuBuilders ]
+      <> [ "%never_matched " <> cuModule <> "." <> cuName <> " (" <> cuType <> ")"
+             <> "  built by: " <> T.intercalate ", " cuBuilders
+         | not (null cuBuilders), null cuMatchers ]

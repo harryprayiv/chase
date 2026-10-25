@@ -1,19 +1,21 @@
 -- allium: 3
 -- chase-derive.allium
 --
--- The derive pass (Phase 0 of the Allium-influenced changes, 2026-10-25):
--- facts chase reads from parsed bodies, and the checks that hold
--- hand-written annotations to them. Companion to chase.allium, which
--- covers everything else about chase. Merge into it once Phase 0 has run
--- on a real project.
+-- The derive pass (Phases 0 and 1 of the Allium-influenced changes,
+-- 2026-10-25): facts chase reads from parsed bodies and from the
+-- compiler's HIE files, and the checks that hold hand-written annotations
+-- to them. Companion to chase.allium, which covers everything else about
+-- chase. Merge into it once both phases have run on a real project.
 --
 -- Scope
 --   Includes: the Haskell derive pass over the parsed tree, the run-wide
 --             constructor map, derived transitions, abstract types,
---             constant candidates, callers from the run's roots, the three
---             topology checks and the consumes check.
---   Excludes: name resolution and types (Phase 1, HIE files), compiler
---             diagnostics (Phase 2), the PureScript derive pass (Phase 4).
+--             constant candidates, the three topology checks and the
+--             consumes check (Phase 0); HIE reading, resolved callers,
+--             external uses, unreferenced bindings and constructor usage
+--             (Phase 1).
+--   Excludes: compiler diagnostics (Phase 2), the PureScript derive pass
+--             (Phase 4).
 
 ------------------------------------------------------------
 -- External Entities
@@ -22,7 +24,14 @@
 external entity ChaseRun {
     roots: List<String>
     derive_enabled: Boolean
+    hie_dir: String?
     skeletons: Skeleton with run = this
+    hie_modules: HieModule with run = this
+}
+
+external entity HieFile {
+    path: String
+    ghc_version: String
 }
 
 ------------------------------------------------------------
@@ -60,6 +69,19 @@ value SumType {
     constructors: List<String>
 }
 
+value Ref {
+    module_name: String
+    unit: String
+    name: String
+    kind: RefKind
+}
+
+value Binding {
+    name: String
+    line: Integer
+    refs: List<Ref>
+}
+
 ------------------------------------------------------------
 -- Enumerations
 ------------------------------------------------------------
@@ -67,6 +89,8 @@ value SumType {
 enum Language { haskell | purescript }
 
 enum Thrower { throwError | throwIO | throwM | throw | throwE | left | fail | error | exitWith }
+
+enum RefKind { value | build | match | type_ref }
 
 ------------------------------------------------------------
 -- Entities and Variants
@@ -102,6 +126,31 @@ entity ConstructorMap {
 entity Warning {
     skeleton: Skeleton
     text: String
+}
+
+entity HieModule {
+    run: ChaseRun
+    file: HieFile
+    module_name: String
+    unit: String
+    exports: List<String>
+    constructors: List<SumType>
+    bindings: List<Binding>
+}
+
+entity HieFacts {
+    skeleton: Skeleton
+    uses: Map<String, List<String>>
+    unreferenced: List<String>
+}
+
+entity ConstructorUsage {
+    run: ChaseRun
+    module_name: String
+    type_name: String
+    constructor: String
+    builders: List<String>
+    matchers: List<String>
 }
 
 ------------------------------------------------------------
@@ -181,6 +230,7 @@ rule DeriveEdges {
 rule AttachCallers {
     when: skeleton: Skeleton.created
     requires: skeleton.run.derive_enabled
+    requires: skeleton.run.hie_modules.count = 0
     let index = caller_index(skeleton.run.roots)
     ensures:
         for n in skeleton.signatures:
@@ -193,6 +243,81 @@ rule AttachCallers {
         -- the run's roots as given, not the .cabal hs-source-dirs that
         -- chase-annotate's callers use, so a run over one directory of
         -- several reports callers from that directory only.
+}
+
+rule ReadHieFiles {
+    when: HieDirGiven(run)
+    requires: exists run.hie_dir
+    ensures:
+        for f in hie_files_under(run.hie_dir):
+            if f.ghc_version = chase_ghc_version:
+                HieModule.created(run: run, file: f)
+            else:
+                Warning.created(text: "hie: file could not be read")
+    ensures: two files for one module keep the first in path order
+
+    @guidance
+        -- The reader is built against the ghc package of the compiler that
+        -- builds chase; the flake's compiler setting chooses the version.
+        -- Every identifier in a HIE file is resolved to its defining
+        -- module and unit, so a reference needs no import resolution. A
+        -- binding's references are the Use occurrences inside its span; a
+        -- constructor under a Pat node is a match, elsewhere a build.
+        -- Instance method bodies have no module-scope binding and are not
+        -- attributed to anything.
+}
+
+rule ResolvedCallers {
+    when: hm: HieModule.created
+    ensures:
+        for s in hm.run.skeletons:
+            for n in s.signatures:
+                s.derived.callers[n] = bindings across hm.run.hie_modules
+                    whose refs contain Ref(s.module_name, _, n, value)
+
+    @guidance
+        -- When any HIE module was read, this index replaces the one from
+        -- AttachCallers for every skeleton of the run. Names are exact, so
+        -- two modules defining the same name are told apart, and bindings
+        -- produced by Template Haskell are included.
+}
+
+rule DeriveHieFacts {
+    when: skeleton: Skeleton.created
+    let hm = HieModule{run: skeleton.run, module_name: skeleton.module_name}
+    requires: exists hm
+    let project_units = skeleton.run.hie_modules -> unit
+    ensures:
+        let f = HieFacts.created(skeleton: skeleton)
+        for b in hm.bindings:
+            f.uses[b.name] = b.refs where kind = value and unit not in project_units
+                             -> module_name + "." + name, capped at twelve
+        f.unreferenced = hm.bindings where name not in hm.exports
+                         and skeleton.derived.callers[name].count = 0 -> name
+}
+
+rule DeriveConstructorUsage {
+    when: AllHieRead(run)
+    requires: run.hie_modules.count >= 1
+    ensures:
+        for hm in run.hie_modules:
+            for t in hm.constructors:
+                for c in t.constructors:
+                    let builders = bindings across run.hie_modules with a ref
+                                   Ref(hm.module_name, _, c, build)
+                    let matchers = bindings across run.hie_modules with a ref
+                                   Ref(hm.module_name, _, c, match)
+                    if builders.count = 0 or (matchers.count = 0 and t.constructors.count >= 2):
+                        ConstructorUsage.created(run: run, module_name: hm.module_name,
+                            type_name: t.type_name, constructor: c,
+                            builders: builders, matchers: matchers)
+
+    @guidance
+        -- A constructor nothing builds is a state the program never
+        -- enters (Allium: missing producer). A constructor of a sum type
+        -- nothing matches is a state nothing observes. Single-constructor
+        -- types are exempt from the match check, since records are read
+        -- through field selectors.
 }
 
 rule RenderDerived {
@@ -307,6 +432,17 @@ invariant EdgesStayWithinOneType {
         e.from = "*" or (e.from in constructors_of(e.type_name) and e.to in constructors_of(e.type_name))
 }
 
+invariant HieFactsAreResolved {
+    for f in HieFacts:
+        for (b, names) in f.uses:
+            names.all(n => n names a definition in a unit outside the run's HIE units)
+}
+
+invariant NoHieIsPhaseZero {
+    for r in ChaseRuns:
+        r.hie_modules.count = 0 implies bundle_bytes(r) = bundle_bytes_after_phase_0(r)
+}
+
 invariant DeriveOffIsTheOldOutput {
     for r in ChaseRuns:
         not r.derive_enabled implies bundle_bytes(r) = bundle_bytes_before_phase_0(r)
@@ -327,6 +463,8 @@ deferred built_constructors(site)
 deferred caller_index(roots)
 deferred first_word(text)
 deferred is_qualified_function(token)
+deferred hie_files_under(dir)
+deferred chase_ghc_version
 
 ------------------------------------------------------------
 -- Open Questions
@@ -335,5 +473,9 @@ deferred is_qualified_function(token)
 open question "A clause that matches constructor A and calls show B produces the edge A -> B. Should built constructors be limited to return positions, which is tractable syntactically but misses constructors passed to a state-setting function?"
 
 open question "The caller index parses every source file a second time. Should the derive closure also expose the bindings and references so the index comes from the first parse?"
+
+open question "Instance method bodies are not attributed to any binding, so a constructor used only inside an instance is reported as never built or never matched, and a function called only from an instance has no callers. Should instance methods become bindings named Class.Type.method?"
+
+open question "A project of several packages writes one .inference/hie per package directory, and chase reads only the root one by default. Should the auto-detection walk the hs-source-dirs of every .cabal under the root, or should the cabal.project.local point every package at one directory?"
 
 open question "PureScript has the same clause, failure and transition shapes in its CST. Is the Phase 0 pass worth porting before Phase 4 (CoreFn) exists, or does CoreFn make the syntactic pass redundant on that side?"

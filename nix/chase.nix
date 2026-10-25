@@ -10,7 +10,7 @@
 # src is the bare tree; the flake replaces it with the tree plus the
 # vendored PureScript CST, which is gitignored.
 { mkDerivation, aeson, aeson-pretty, array, async, base, bytestring
-, containers, deepseq, directory, dlist, filepath, ghc-lib-parser
+, containers, deepseq, directory, dlist, filepath, ghc, ghc-lib-parser
 , grace, happy, hashable, http-client, http-types, lib, mtl
 , optparse-applicative, parallel, protolude, scientific, serialise
 , syb, text, transformers, utf8-string, vector
@@ -24,7 +24,7 @@ mkDerivation {
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson aeson-pretty array async base bytestring containers deepseq
-    directory dlist filepath ghc-lib-parser grace hashable http-client
+    directory dlist filepath ghc ghc-lib-parser grace hashable http-client
     http-types mtl parallel protolude scientific serialise syb text
     transformers utf8-string vector
   ];

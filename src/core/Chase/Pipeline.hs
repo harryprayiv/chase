@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE BlockArguments    #-}
+{-# LANGUAGE MultiWayIf        #-}
 
 module Chase.Pipeline
   ( ChaseConfig (..)
@@ -31,10 +32,13 @@ import qualified Data.List
 import           Chase.Types
 import           Chase.Parse
 import           Chase.Render
-import qualified Chase.Callers  as Callers
-import qualified Chase.Coverage as Coverage
+import qualified Chase.Callers       as Callers
+import qualified Chase.Coverage      as Coverage
 import           Chase.Derive
-import           Chase.Sources (findSourceFiles)
+import           Chase.Derive.GhcLog (attachGhcWarnings, parseGhcLog, unattached)
+import           Chase.Derive.Hie    (constructorUsage, hieCallerIndex, hieFactsFor)
+import           Chase.Hie           (HieModule, readHieDir)
+import           Chase.Sources       (findSourceFiles)
 
 data ChaseConfig = ChaseConfig
   { cfgSourceRoots :: [FilePath]
@@ -47,6 +51,12 @@ data ChaseConfig = ChaseConfig
   -- ^ run the derive pass: clause, fails and literal lines, constant
   -- candidates, abstract types, callers, derived transitions and the
   -- checks of %topology and consumes against them
+  , cfgHieDir      :: Maybe FilePath
+  -- ^ a directory holding the project's .hie files; when given, callers
+  -- are resolved from them and the HIE facts are attached
+  , cfgGhcLog      :: Maybe FilePath
+  -- ^ a GHC build log; its warnings are attached to the signatures they
+  -- point at
   }
 
 defaultConfig :: ChaseConfig
@@ -58,6 +68,8 @@ defaultConfig = ChaseConfig
   , cfgTestRoots   = []
   , cfgVerbose     = False
   , cfgDerive      = True
+  , cfgHieDir      = Nothing
+  , cfgGhcLog      = Nothing
   }
 
 -- | One source file after parsing.
@@ -69,39 +81,72 @@ data Item
 -- file has been parsed.
 data RunContext = RunContext
   { rcTestIndex  :: Coverage.TestRefIndex
-  , rcCallers    :: Maybe Callers.CallerIndex
+  , rcCallers    :: Maybe RefIndex
   , rcTopologies :: [DerivedTopology]
   , rcConMap     :: ConMap
+  , rcHie        :: [HieModule]
+  , rcUsage      :: [ConstructorUsage]
+  , rcWarnings   :: [GhcWarning]
   }
 
 runChase :: ChaseConfig -> IO ()
 runChase cfg = do
-  testIdx <- buildTestIndexOrEmpty cfg
-  items   <- parseAll cfg
+  testIdx  <- buildTestIndexOrEmpty cfg
+  items    <- parseAll cfg
+  hie      <- readHie cfg
+  warnings <- readGhcLog cfg
   let oks     = [ p | ItemOk _ p <- items ]
       conMap  = buildConMap oks
       derived = [ parsedDerive p conMap | p <- oks ]
       tops    = if cfgDerive cfg then mergeTopologies oks derived else []
   callers <-
-    if cfgDerive cfg
-      then Just <$> Callers.buildCallerIndex
+    if | not (cfgDerive cfg) -> pure Nothing
+       | not (null hie) -> pure (Just (hieCallerIndex hie))
+       | otherwise ->
+           Just <$> Callers.buildCallerIndex
              (cfgVerbose cfg)
              Callers.ScanPlan
                { Callers.spRoots  = cfgSourceRoots cfg
                , Callers.spSource = "the run's source roots"
                }
-      else pure Nothing
   let ctx = RunContext
         { rcTestIndex  = testIdx
         , rcCallers    = callers
         , rcTopologies = tops
         , rcConMap     = conMap
+        , rcHie        = hie
+        , rcUsage      = constructorUsage hie
+        , rcWarnings   = warnings
         }
+      stray = unattached warnings (map parsedFile oks)
+  when (not (null stray)) $
+    putStrLn $ "ghc    " <> show (length stray) <> " warnings point at files outside this run"
   parsed <- case cfgBundleFile cfg of
     Nothing     -> runPerFile  cfg ctx items
     Just bundle -> runBundled  cfg ctx items bundle
   forM_ (unmatchedAnnotations (cfgAnnotations cfg) parsed) \w ->
     putStrLn $ "  drift: " <> T.unpack w
+
+-- | The HIE files, when a directory was given. Files that cannot be read
+-- are reported one per line; a GHC version other than chase's own is the
+-- usual cause.
+readHie :: ChaseConfig -> IO [HieModule]
+readHie ChaseConfig{..} = case cfgHieDir of
+  Nothing  -> pure []
+  Just dir -> do
+    (mods, warnings) <- readHieDir dir
+    forM_ warnings \w -> TIO.putStrLn ("WARN: hie: " <> w)
+    putStrLn $ "hie    " <> show (length mods) <> " modules from " <> dir
+    pure mods
+
+-- | The compiler's warnings, when a build log was given.
+readGhcLog :: ChaseConfig -> IO [GhcWarning]
+readGhcLog ChaseConfig{..} = case cfgGhcLog of
+  Nothing   -> pure []
+  Just path -> do
+    ws <- parseGhcLog <$> TIO.readFile path
+    putStrLn $ "ghc    " <> show (length ws) <> " warnings from " <> path
+    pure ws
 
 -- | Parse every file under the source roots once. Failures are reported
 -- here and carried as items so the bundle can hold a block for them.
@@ -166,7 +211,12 @@ finishFile ChaseConfig{..} RunContext{..} p =
         if cfgDerive
           then structural { chaseDerived = Just (parsedDerive p rcConMap) }
           else structural
-      withAnn  = attachAnnotations cfgAnnotations withDerived
+      withHie  = case rcCallers of
+        Just idx | not (null rcHie) ->
+          withDerived { chaseHie = hieFactsFor rcHie idx (chaseModuleName structural) }
+        _ -> withDerived
+      withGhc  = attachGhcWarnings rcWarnings withHie
+      withAnn  = attachAnnotations cfgAnnotations withGhc
       withCov  = if null cfgTestRoots then withAnn else Coverage.attachCoverage rcTestIndex withAnn
       merged   = case rcCallers of
         Just idx -> attachCallers idx withCov
@@ -178,8 +228,8 @@ finishFile ChaseConfig{..} RunContext{..} p =
   in (merged, drift)
 
 -- | Writes one .chase per source file, plus DERIVED.chase for the
--- run-wide transitions when there are any. Returns the modules parsed,
--- and likewise for 'runBundled'.
+-- run-wide transitions and constructor usage when there are any. Returns
+-- the modules parsed, and likewise for 'runBundled'.
 runPerFile :: ChaseConfig -> RunContext -> [Item] -> IO (Set Text)
 runPerFile cfg@ChaseConfig{..} ctx items = do
   createDirectoryIfMissing True cfgOutputDir
@@ -195,7 +245,7 @@ runPerFile cfg@ChaseConfig{..} ctx items = do
       TIO.writeFile outPath rendered
       when cfgVerbose $ putStrLn $ "write  " <> outPath
       pure [chaseModuleName merged]
-  let tail' = renderDerivedTopologies (rcTopologies ctx)
+  let tail' = runTail ctx
   when (not (T.null tail')) $ do
     let derivedPath = cfgOutputDir </> "DERIVED.chase"
     TIO.writeFile derivedPath tail'
@@ -218,13 +268,18 @@ runBundled cfg@ChaseConfig{..} ctx items bundlePath = do
       failures  = length [ () | (Nothing, _) <- blocks ]
       bundle = renderPreamble cfgSourceRoots successes failures
             <> T.concat (map snd blocks)
-            <> renderDerivedTopologies (rcTopologies ctx)
+            <> runTail ctx
   TIO.writeFile bundlePath bundle
   when cfgVerbose $ do
     putStrLn $ "bundled " <> show successes
             <> " files (" <> show failures <> " parse failures)"
     putStrLn $ "write  " <> bundlePath
   pure (Set.fromList [ m | (Just m, _) <- blocks ])
+
+-- | The run-wide sections that follow the per-file blocks.
+runTail :: RunContext -> Text
+runTail RunContext{..} =
+  renderDerivedTopologies rcTopologies <> renderConstructorUsage rcUsage
 
 -- | The bundle's header. Nothing in it depends on when chase ran, so the
 -- same sources, annotations and test roots give the same bytes. A
@@ -243,32 +298,42 @@ renderPreamble roots ok failed =
     , "# Haskell and PureScript source files concatenated into one document."
     , "# Each block begins with === BEGIN <path> === on its own line."
     , "# Blocks contain the rendered .chase format: %file, %mod, %lang,"
-    , "# %ext (Haskell only), %fixity, %uses, %const, %const_candidate,"
-    , "# %topology, %abstract, data decls, %foreign (PureScript only),"
-    , "# %pattern, type signatures with attached lines, %decision blocks,"
-    , "# %open_issue blocks (known problems with blocking/affects targets),"
-    , "# and parse errors. Function bodies are deliberately omitted."
+    , "# %ext (Haskell only), %ghc, %fixity, %uses, %const, %const_candidate,"
+    , "# %topology, %abstract, %untested, data decls, %foreign (PureScript"
+    , "# only), %pattern, type signatures with attached lines, %decision"
+    , "# blocks, %open_issue blocks (known problems with blocking/affects"
+    , "# targets), and parse errors. Function bodies are deliberately omitted."
     , "#"
     , "# Lines under a signature, by sigil:"
     , "#   !  a hand-written invariant: a behavioral fact the type does not carry"
     , "#   >  a hand-written consumer of the function or its side effects"
-    , "#   ~  a fact read from the parsed body by chase itself. These are"
+    , "#   ~  a fact chase read from the code itself. From the parse these are"
     , "#      may-facts: a clause may be unreachable, a failure may be on a"
-    , "#      dead path, a literal may be harmless, a caller may be test-only."
+    , "#      dead path, a literal may be harmless."
     , "#      clause: the constructor or literal patterns and guards of one clause"
     , "#      fails: error constructors or strings raised under throwError,"
     , "#        throwIO, throwM, throw, throwE, Left, fail, error, exitWith"
     , "#      literals: literals in the body other than 0, 1 and \"\""
-    , "#      called by: functions in the scanned roots that reference this one"
+    , "#      uses: functions from outside the project that the body references,"
+    , "#        resolved by the compiler (HIE); the side effects the type may hide"
+    , "#      unreferenced: not exported and nothing in the project references it (HIE)"
+    , "#      ghc: the compiler's own warning at this function, from the build log:"
+    , "#        unhandled constructors, unreachable alternatives, partial fields"
+    , "#      called by: functions that reference this one; resolved by the"
+    , "#        compiler when HIE files were read, by import rules otherwise"
     , "#   ?  test functions that reference the name (when test roots were scanned)"
     , "#"
+    , "# %untested lists the names no test references. %ghc at the top of a"
+    , "# block is a compiler warning above every signature of the file."
     , "# %abstract names a data type exported without all its constructors and"
     , "# the exported functions that return it: build values of it through"
     , "# those functions, since the constructors are not reachable from outside."
     , "# %const_candidate is a zero-argument literal binding with no %const note."
     , "# A === DERIVED TRANSITIONS === block at the end lists, per sum type,"
     , "# the constructor-to-constructor edges found in clauses and case"
-    , "# alternatives, each with the function that witnesses it."
+    , "# alternatives, each with the function that witnesses it. A"
+    , "# === CONSTRUCTOR USAGE === block lists constructors nothing builds and"
+    , "# constructors of sum types nothing matches, from the HIE files."
     , ""
     ]
 

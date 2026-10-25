@@ -84,7 +84,7 @@ deriveHaskell modName sigs m conMap =
   in Derived
     { derClauses    = keep [ (n, concatMap clauseLines (matchesOf mg)) | (n, mg) <- withSig ]
     , derFails      = keep [ (n, failsIn mg)    | (n, mg) <- withSig ]
-    , derLiterals   = keep [ (n, capped 12 (literalsIn mg)) | (n, mg) <- withSig ]
+    , derLiterals   = keep [ (n, capped 6 (literalsIn mg)) | (n, mg) <- withSig ]
     , derConstCands = [ (n, v) | (n, mg) <- binds, Just v <- [constCandidate mg] ]
     , derEdges      = concat [ edgesIn conMap (modName <> "." <> n) mg | (n, mg) <- binds ]
     , derAbstract   = abstractTypesOf m sigs
@@ -196,16 +196,22 @@ stringLit = \case
 
 -- literals -------------------------------------------------------------
 
+-- | Literals in a body worth a line: every number and character, and the
+-- short strings that look like a token rather than a message (no space,
+-- at most 22 characters including the quotes). 0, 1 and "" are dropped.
 literalsIn :: Data a => a -> [Text]
 literalsIn x =
-  filter (`notElem` boring) . nub $
+  filter worthKeeping . nub $
     SYB.everything (++) (SYB.mkQ [] lit `SYB.extQ` olit) x
   where
     lit :: HsLit GhcPs -> [Text]
     lit l = [oneLine (render l)]
     olit :: HsOverLit GhcPs -> [Text]
     olit l = [oneLine (render l)]
-    boring = ["0", "1", "\"\""]
+    worthKeeping t
+      | t `elem` ["0", "1", "\"\""] = False
+      | "\"" `T.isPrefixOf` t       = T.length t <= 22 && not (T.any (== ' ') t)
+      | otherwise                   = True
 
 capped :: Int -> [Text] -> [Text]
 capped n xs

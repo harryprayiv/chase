@@ -28,16 +28,19 @@ import           Data.Text            (Text)
 import qualified Data.Text            as T
 import qualified Data.Text.IO         as TIO
 import           Options.Applicative
-import           System.Directory     (doesFileExist)
+import           System.Directory     (doesDirectoryExist, doesFileExist)
 import           System.Environment   (lookupEnv)
 import           System.Exit          (exitFailure)
+import           System.FilePath      ((</>))
 import           GHC.IO.Encoding      (setLocaleEncoding, utf8)
 import           System.IO            (hPutStrLn, hSetEncoding, stderr, stdin, stdout)
 
 import           Chase.Annotations.Json (writeModuleAnnotations)
 import qualified Chase.Callers        as Callers
+import           Chase.Derive.Hie     (hieCallerIndex)
 import qualified Chase.GraceBridge    as GB
-import           Chase.Inference      (defaultAnnotationsTarget)
+import           Chase.Hie            (readHieDir)
+import           Chase.Inference      (defaultAnnotationsTarget, findProjectRoot, inferenceDirName)
 import qualified Chase.Parse          as Parse
 import qualified Chase.Render         as Render
 import qualified Chase.Types          as CT
@@ -51,8 +54,11 @@ data Opts = Opts
   , optOutput     :: Maybe FilePath
   , optMaxRetries :: Int
   , optRoots      :: [FilePath]
+  , optHie        :: HieMode
   , optVerbose    :: Bool
   }
+
+data HieMode = HieAuto | HieDir FilePath | HieOff
 
 opts :: Parser Opts
 opts = Opts
@@ -93,14 +99,28 @@ opts = Opts
         ( strOption
             ( long "roots"
            <> metavar "DIR"
-           <> help "Directories to scan for callers. Repeatable. Defaults to the hs-source-dirs of the library and executable stanzas in the nearest .cabal file above SOURCE."
+           <> help "Directories to scan for callers when no HIE files are read. Repeatable. Defaults to the hs-source-dirs of the library and executable stanzas in the nearest .cabal file above SOURCE."
             )
         )
+  <*> hieOpt
   <*> switch
         ( long "verbose"
        <> short 'v'
        <> help "List every file the caller scan could not parse"
         )
+  where
+    hieOpt =
+          ( HieDir <$> strOption
+              ( long "hie"
+             <> metavar "DIR"
+             <> help "Directory holding the project's .hie files. Callers are then resolved by the compiler and --roots is not used. Default: .inference/hie in the project SOURCE is in, when it exists."
+              )
+          )
+      <|> flag' HieOff
+              ( long "no-hie"
+             <> help "Do not read .hie files even if .inference/hie exists."
+              )
+      <|> pure HieAuto
 
 -- | The key, from a file if one is named, else from the environment.
 -- Fails with a message naming every place it looked, because a missing
@@ -133,6 +153,23 @@ resolveKey explicit = do
               hPutStrLn stderr ("the key file is empty: " <> p)
               exitFailure
             else pure t
+
+-- | The HIE directory: the one given, which must exist, or .inference/hie
+-- in the project the source belongs to, when that exists, or none.
+resolveHie :: FilePath -> HieMode -> IO (Maybe FilePath)
+resolveHie _ HieOff     = pure Nothing
+resolveHie _ (HieDir d) = do
+  ok <- doesDirectoryExist d
+  if ok then pure (Just d) else do
+    hPutStrLn stderr ("hie directory not found: " <> d)
+    exitFailure
+resolveHie source HieAuto =
+  findProjectRoot source >>= \case
+    Nothing   -> pure Nothing
+    Just root -> do
+      let d = root </> inferenceDirName </> "hie"
+      ok <- doesDirectoryExist d
+      pure (if ok then Just d else Nothing)
 
 -- | Every file chase reads or writes is UTF-8, whatever the locale. GHC
 -- opens files and the standard handles in the locale's encoding, and under
@@ -178,13 +215,27 @@ main = do
       -- asked for behavioural facts, which live in the bodies.
       src <- TIO.readFile optSource
 
-      -- The call graph is read from the project's own declared source
-      -- directories. Explicit --roots override that and are used as given.
-      plan <- case optRoots of
-        [] -> Callers.planScan optSource
-        rs -> pure Callers.ScanPlan { Callers.spRoots = rs, Callers.spSource = "--roots as given" }
+      -- Callers come from the project's HIE files when there are any,
+      -- resolved by the compiler. Otherwise the call graph is read from
+      -- the project's own declared source directories, or from explicit
+      -- --roots as given.
+      hieDir <- resolveHie optSource optHie
+      hie <- case hieDir of
+        Nothing -> pure []
+        Just d  -> do
+          (mods, warnings) <- readHieDir d
+          mapM_ (\w -> TIO.hPutStrLn stderr ("hie: " <> w)) warnings
+          putStrLn ("hie: " <> show (length mods) <> " modules from " <> d)
+          pure mods
 
-      callerIdx <- Callers.buildCallerIndex optVerbose plan
+      callerIdx <-
+        if not (null hie)
+          then pure (hieCallerIndex hie)
+          else do
+            plan <- case optRoots of
+              [] -> Callers.planScan optSource
+              rs -> pure Callers.ScanPlan { Callers.spRoots = rs, Callers.spSource = "--roots as given" }
+            Callers.buildCallerIndex optVerbose plan
 
       let names =
             map CT.sigName (CT.chaseSignatures chaseFile)
