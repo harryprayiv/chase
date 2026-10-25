@@ -6,6 +6,10 @@
 -- Revised 2026-10-24 after the fixes: every rule below describes what the
 -- code does now. The issues the first draft found, and what was done about
 -- each, are in "Fixed" at the bottom.
+-- Revised 2026-10-25 for the derive pass (Phase 0): Skeleton carries the
+-- derived facts and callers, Topology carries a terminal list, and
+-- DriftChecks and WriteBundle account for the pass. The pass itself is
+-- specified in chase-derive.allium beside this file.
 --
 -- Scope
 --   Includes: source discovery, the structural skeleton of a Haskell or
@@ -83,7 +87,8 @@ value OpenIssue { name: String, what: String, why: String, blocking: List<String
 
 value Constant { name: String, value: String, notes: List<String> }
 
-value Topology { name: String, vertices: List<String>, transitions: Map<String, List<String>> }
+value Topology { name: String, vertices: List<String>, transitions: Map<String, List<String>>, terminal: List<String> }
+-- terminal is optional in the JSON and empty when absent
 
 value Reference {
     qualifier: String?
@@ -97,6 +102,11 @@ entity Skeleton {
     patterns: List<String>
     annotations: ModuleAnnotations?
     tested_by: Map<String, List<TestRef>>?
+    callers: Map<String, List<TestRef>>?
+    -- from the run's own roots; present when the derive pass is on
+    derived: Derived?
+    -- see chase-derive.allium; present when the derive pass is on and the
+    -- language is Haskell
 
     defined_names: signatures + foreign_imports + patterns
 }
@@ -204,6 +214,10 @@ rule DriftChecks {
              signature is reported as repeating the type
     ensures: an open issue claiming something absent that the file defines
              is reported as fabricated
+    ensures: with the derive pass on, each %topology is checked against the
+             derived edges and each consumes entry against the callers
+             (chase-derive.allium CheckTopologyWitnesses, CheckTopologyUnmatched,
+             CheckTopologyExits, CheckConsumesAgainstCallers)
     @guidance "The emptiness check has a documented false positive for facts
                carried in plain English."
 }
@@ -236,7 +250,13 @@ rule CoverageByReference {
 rule WriteBundle {
     when: ChaseRun(sources, output ending .chase)
     ensures: the bundle's bytes depend only on the sources, the annotations,
-             the test roots and the roots as given (U3)
+             the test roots, the roots as given and whether the derive pass
+             is on (U3)
+    ensures: every file under the roots is parsed before any file is
+             rendered, so the run-wide constructor map exists when the
+             derive pass runs
+    ensures: with the derive pass on, a DERIVED TRANSITIONS block ends the
+             bundle; in per-file mode it is written as DERIVED.chase
     @guidance "There is no timestamp in the preamble, so open-slop's
                content-hash check skips a bundle whose code has not
                changed."
